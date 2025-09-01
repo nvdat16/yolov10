@@ -368,7 +368,7 @@ class CSWinTransformer(nn.Module):
         x = self.forward_features(x)
         return x
 
-class Select(nn.Module):
+class Stage(nn.Module):
     def __init__(self, index):
         super().__init__()
         self.index = index
