@@ -366,8 +366,9 @@ class CSWinTransformer(nn.Module):
         return reshape(s1), reshape(s2), reshape(s3), reshape(s4)
 
     def forward(self, x):
-        x = self.forward_features(x)
-        return x
+        s1, s2, s3, s4 = self.forward_features(x)
+        return [s1, s2, s3, s4]
+
 
 class Stage(nn.Module):
     def __init__(self, index):
