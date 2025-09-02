@@ -254,7 +254,10 @@ class CSWinTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         heads = num_heads
-
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        self.img_size = img_size
+        
         self.stage1_conv_embed = nn.Sequential(
             nn.Conv2d(in_chans, embed_dim, 7, 4, 2),
             Rearrange('b c h w -> b (h w) c', h = img_size//4, w = img_size//4),
