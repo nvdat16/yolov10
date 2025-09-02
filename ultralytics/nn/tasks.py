@@ -941,7 +941,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is Stage:
             idx = args[0]
             model = Stage(idx)
-            c2 = ch[from_]
+            c2 = ch[f]
         else:
             c2 = ch[f]
 
