@@ -245,8 +245,8 @@ class Merge_Block(nn.Module):
 class CSWinTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
-    def __init__(self, img_size=640, patch_size=4, in_chans=3, num_classes=1000, embed_dim=64, depth=[1,2,21,1], split_size = [1,2,7,7],
-                 num_heads=[2,4,8,16], mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=96, depth=[2,2,6,2], split_size = [3,5,7],
+                 num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, use_chk=False):
         super().__init__()
         self.num_classes = num_classes
@@ -254,13 +254,10 @@ class CSWinTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         heads = num_heads
-        if isinstance(img_size, int):
-            img_size = (img_size, img_size)
-        self.img_size = img_size
         
         self.stage1_conv_embed = nn.Sequential(
             nn.Conv2d(in_chans, embed_dim, 7, 4, 2),
-            Rearrange('b c h w -> b (h w) c', h = img_size[0]//4, w = img_size[1]//4),
+            Rearrange('b c h w -> b (h w) c', h = img_size//4, w = img_size//4),
             nn.LayerNorm(embed_dim)
         )
 
@@ -268,7 +265,7 @@ class CSWinTransformer(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, np.sum(depth))]  # stochastic depth decay rule
         self.stage1 = nn.ModuleList([
             CSWinBlock(
-                dim=curr_dim, num_heads=heads[0], reso=img_size[0]//4, mlp_ratio=mlp_ratio,
+                dim=curr_dim, num_heads=heads[0], reso=img_size//4, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, split_size=split_size[0],
                 drop=drop_rate, attn_drop=attn_drop_rate,
                 drop_path=dpr[i], norm_layer=norm_layer)
@@ -278,27 +275,30 @@ class CSWinTransformer(nn.Module):
         curr_dim = curr_dim*2
         self.stage2 = nn.ModuleList(
             [CSWinBlock(
-                dim=curr_dim, num_heads=heads[1], reso=img_size[0]//8, mlp_ratio=mlp_ratio,
+                dim=curr_dim, num_heads=heads[1], reso=img_size//8, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, split_size=split_size[1],
                 drop=drop_rate, attn_drop=attn_drop_rate,
                 drop_path=dpr[np.sum(depth[:1])+i], norm_layer=norm_layer)
             for i in range(depth[1])])
-
+        
         self.merge2 = Merge_Block(curr_dim, curr_dim*2)
         curr_dim = curr_dim*2
-        self.stage3 = nn.ModuleList(
+        temp_stage3 = []
+        temp_stage3.extend(
             [CSWinBlock(
-                dim=curr_dim, num_heads=heads[2], reso=img_size[0]//16, mlp_ratio=mlp_ratio,
+                dim=curr_dim, num_heads=heads[2], reso=img_size//16, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, split_size=split_size[2],
                 drop=drop_rate, attn_drop=attn_drop_rate,
                 drop_path=dpr[np.sum(depth[:2])+i], norm_layer=norm_layer)
             for i in range(depth[2])])
 
+        self.stage3 = nn.ModuleList(temp_stage3)
+        
         self.merge3 = Merge_Block(curr_dim, curr_dim*2)
         curr_dim = curr_dim*2
         self.stage4 = nn.ModuleList(
             [CSWinBlock(
-                dim=curr_dim, num_heads=heads[3], reso=img_size[0]//32, mlp_ratio=mlp_ratio,
+                dim=curr_dim, num_heads=heads[3], reso=img_size//32, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, split_size=split_size[-1],
                 drop=drop_rate, attn_drop=attn_drop_rate,
                 drop_path=dpr[np.sum(depth[:-1])+i], norm_layer=norm_layer, last_stage=True)
