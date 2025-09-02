@@ -53,10 +53,15 @@ from ultralytics.nn.modules import (
     PSA,
     SCDown,
     RepVGGDW,
-    v10Detect,
-    CSWinTransformer,
-    Stage
+    v10Detect
 )
+
+from ultralytics.nn.modules import CSWinTransformer
+globals()['CSWinTransformer'] = CSWinTransformer
+
+from ultralytics.nn.modules import Select
+globals()['Select'] = Select
+
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss, v10DetectLoss
