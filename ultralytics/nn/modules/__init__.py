@@ -79,6 +79,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
+from cswin import CSWinTransformer, Stage
 
 __all__ = (
     "Conv",
@@ -143,5 +144,7 @@ __all__ = (
     "C2fCIB",
     "SCDown",
     "RepVGGDW",
-    "v10Detect"
+    "v10Detect",
+    "CSWinTransformer",
+    "Stage"
 )
