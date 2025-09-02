@@ -79,7 +79,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from cswin import CSWinTransformer, Stage
+from .cswin import CSWinTransformer, Stage
 
 __all__ = (
     "Conv",
