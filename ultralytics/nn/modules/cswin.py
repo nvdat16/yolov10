@@ -245,11 +245,11 @@ class Merge_Block(nn.Module):
 class CSWinTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
-    def __init__(self, img_size=640, patch_size=4, in_chans=3, num_classes=1000, embed_dim=64, depth=[2,4,8,2], split_size = [10, 8, 5, 5],
+    def __init__(self, img_size=640, patch_size=10, in_chans=3, num_classes=1000, embed_dim=64, depth=[2,4,8,2], split_size = [10, 8, 5, 5],
                  num_heads=[2,4,8,16], mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, use_chk=False):
         super().__init__()
-        self.num_classes = num_classes
+        self.num_classes = num_classes  
         self.use_chk = use_chk
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
