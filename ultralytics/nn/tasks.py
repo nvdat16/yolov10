@@ -54,8 +54,10 @@ from ultralytics.nn.modules import (
     SCDown,
     RepVGGDW,
     v10Detect,
-    CSWinTransformer
+    CSWinTransformer,
+    Stage
 )
+
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss, v10DetectLoss
@@ -930,6 +932,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is CSWinTransformer:
+            cswin = CSWinTransformer(*args)
+            c2 = [96, 192, 384, 768]
+            model = cswin
+            for c in c2:
+                ch.append(c)
+        elif m is Stage:
+            idx = args[0]
+            model = Stage(idx)
+            c2 = ch[f]
         else:
             c2 = ch[f]
 
