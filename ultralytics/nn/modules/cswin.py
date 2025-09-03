@@ -235,17 +235,5 @@ class CSWinTransformer(nn.Module):
         p3 = self.lateral[0](x2)
         p4 = self.lateral[1](x3)
         p5 = self.lateral[2](x4)
-        return [p3, p4, p5]
+        return p5
     
-class Stage(nn.Module):
-    def __init__(self, index):
-        super().__init__()
-        self.index = index
-    def forward(self, x):
-            # Ensure only a single tensor is returned, not a list
-        if isinstance(x, (list, tuple)):
-            if len(x) > self.index:
-                return x[self.index]
-            else:
-                raise IndexError(f"Stage: input list/tuple too short for index {self.index}, got length {len(x)}")
-        return x

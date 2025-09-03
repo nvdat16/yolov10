@@ -932,16 +932,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
-        elif m is CSWinTransformer:
-            cswin = CSWinTransformer(*args)
-            c2 = [96, 192, 384, 768]
-            model = cswin
-            for c in c2:
-                ch.append(c)
-        elif m is Stage:
-            idx = args[0]
-            model = Stage(idx)
-            c2 = ch[f]
         else:
             c2 = ch[f]
 
