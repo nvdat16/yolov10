@@ -235,5 +235,4 @@ class CSWinTransformer(nn.Module):
         p3 = self.lateral[0](x2)
         p4 = self.lateral[1](x3)
         p5 = self.lateral[2](x4)
-        return p5
-    
+        return [p3,p4,p5]
