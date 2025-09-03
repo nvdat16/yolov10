@@ -242,6 +242,10 @@ class Stage(nn.Module):
         super().__init__()
         self.index = index
     def forward(self, x):
+            # Ensure only a single tensor is returned, not a list
         if isinstance(x, (list, tuple)):
-            return x[self.index]
+            if len(x) > self.index:
+                return x[self.index]
+            else:
+                raise IndexError(f"Stage: input list/tuple too short for index {self.index}, got length {len(x)}")
         return x
