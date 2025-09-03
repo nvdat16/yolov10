@@ -242,4 +242,6 @@ class Stage(nn.Module):
         super().__init__()
         self.index = index
     def forward(self, x):
-        return x[self.index]
+        if isinstance(x, (list, tuple)):
+            return x[self.index]
+        return x
