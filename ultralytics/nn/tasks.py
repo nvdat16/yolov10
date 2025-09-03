@@ -934,14 +934,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f[-1]]
         elif m is CSWinTransformer:
             cswin = CSWinTransformer(*args)
-            c2 = [96, 192, 384, 768]
-            model = cswin
+            c2 = list(cswin.out_channels)  # lấy đúng out_channels từ CSWinTransformer
             for c in c2:
                 ch.append(c)
         elif m is Stage:
             idx = args[0]
-            model = Stage(idx)
-            c2 = ch[f]
+            # ch[f] là list các channels output của backbone, lấy đúng index
+            if isinstance(ch[f], (list, tuple)):
+                c2 = ch[f][idx]
+            else:
+                c2 = ch[f]
         else:
             c2 = ch[f]
 
