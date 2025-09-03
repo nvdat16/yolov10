@@ -296,6 +296,8 @@ class CSWinTransformer(nn.Module):
         
         self.merge3 = Merge_Block(curr_dim, curr_dim*2)
         curr_dim = curr_dim*2
+        self.out_dim = curr_dim  # Track final output dimension
+
         self.stage4 = nn.ModuleList(
             [CSWinBlock(
                 dim=curr_dim, num_heads=heads[3], reso=img_size//32, mlp_ratio=mlp_ratio,
@@ -304,9 +306,9 @@ class CSWinTransformer(nn.Module):
                 drop_path=dpr[np.sum(depth[:-1])+i], norm_layer=norm_layer, last_stage=True)
             for i in range(depth[-1])])
        
-        self.norm = norm_layer(curr_dim)
+        self.norm = norm_layer(self.out_dim)
         # Classifier head
-        self.head = nn.Linear(curr_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.out_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         trunc_normal_(self.head.weight, std=0.02)
         self.apply(self._init_weights)
