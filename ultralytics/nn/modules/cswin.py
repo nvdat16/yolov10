@@ -186,11 +186,10 @@ class CSWinTransformer(nn.Module):
       S4: 8C (stride 32) -> OUT P5
     """
     def __init__(self,
-                 embed_dim=64, depths=(1, 1, 6, 1), heads=(2, 4, 8, 8),
-                 mlp_ratio=4.0, sw=(1, 2, 7, 7), out_indices=(1, 2, 3),
-                 out_channels=(192, 384, 768)):
+                 embed_dim=64, depths=(1, 1, 6, 1), heads=(2, 4, 8, 16),
+                 mlp_ratio=4.0, sw=(1, 2, 7, 7), out_channels=(192, 384, 768)):
         super().__init__()
-        self.out_indices = out_indices
+
         C = embed_dim
         self.patch_embed = PatchEmbed(3, C)
 
