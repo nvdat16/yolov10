@@ -186,7 +186,7 @@ class CSWinTransformer(nn.Module):
       S4: 8C (stride 32) -> OUT P5
     """
     def __init__(self,
-                 embed_dim=64, depths=(1, 1, 6, 1), heads=(2, 4, 8, 16),
+                 embed_dim=64, depths=(1, 2, 21, 1), heads=(2, 4, 8, 16),
                  mlp_ratio=4.0, sw=(1, 2, 7, 7), out_channels=(128, 256, 512)):
         super().__init__()
 
