@@ -187,7 +187,7 @@ class CSWinTransformer(nn.Module):
     """
     def __init__(self,
                  embed_dim=64, depths=(1, 1, 6, 1), heads=(2, 4, 8, 16),
-                 mlp_ratio=4.0, sw=(1, 2, 7, 7), out_channels=(192, 384, 768)):
+                 mlp_ratio=4.0, sw=(1, 2, 7, 7), out_channels=(128, 256, 512)):
         super().__init__()
 
         C = embed_dim
