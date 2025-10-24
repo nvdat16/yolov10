@@ -55,7 +55,8 @@ from ultralytics.nn.modules import (
     RepVGGDW,
     v10Detect,
     CSWinTransformer,
-    Stage
+    Stage,
+    SwinTransformerV2,
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -935,6 +936,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is CSWinTransformer:
             cswin = CSWinTransformer(*args)
             c2 = list(cswin.out_channels)  # lấy đúng out_channels từ CSWinTransformer
+            for c in c2:
+                ch.append(c)
+        elif m is SwinTransformerV2:
+            cswin = SwinTransformerV2(*args)
+            c2 = list(cswin.out_channels)  # lấy đúng out_channels từ SwinTransformerV2
             for c in c2:
                 ch.append(c)
         elif m is Stage:

@@ -1,890 +1,645 @@
-from typing import Tuple, Optional, List, Union, Any
+# --------------------------------------------------------
+# Swin Transformer V2
+# Copyright (c) 2022 Microsoft
+# Licensed under The MIT License [see LICENSE for details]
+# Written by Ze Liu
+# --------------------------------------------------------
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-import timm
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+import numpy as np
 
-__all__: List[str] = ["SwinTransformerStage", "SwinTransformerBlock", "DeformableSwinTransformerBlock"]
+
+class Mlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
 
 
-class FeedForward(nn.Sequential):
+def window_partition(x, window_size):
     """
-    Feed forward module used in the transformer encoder.
+    Args:
+        x: (B, H, W, C)
+        window_size (int): window size
+
+    Returns:
+        windows: (num_windows*B, window_size, window_size, C)
     """
-
-    def __init__(self,
-                 in_features: int,
-                 hidden_features: int,
-                 out_features: int,
-                 dropout: float = 0.) -> None:
-        """
-        Constructor method
-        :param in_features: (int) Number of input features
-        :param hidden_features: (int) Number of hidden features
-        :param out_features: (int) Number of output features
-        :param dropout: (float) Dropout factor
-        """
-        # Call super constructor and init modules
-        super().__init__(
-            nn.Linear(in_features=in_features, out_features=hidden_features),
-            nn.GELU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(in_features=hidden_features, out_features=out_features),
-            nn.Dropout(p=dropout)
-        )
+    B, H, W, C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    return windows
 
 
-def bchw_to_bhwc(input: torch.Tensor) -> torch.Tensor:
+def window_reverse(windows, window_size, H, W):
     """
-    Permutes a tensor to the shape [batch size, height, width, channels]
-    :param input: (torch.Tensor) Input tensor of the shape [batch size, height, width, channels]
-    :return: (torch.Tensor) Output tensor of the shape [batch size, height, width, channels]
+    Args:
+        windows: (num_windows*B, window_size, window_size, C)
+        window_size (int): Window size
+        H (int): Height of image
+        W (int): Width of image
+
+    Returns:
+        x: (B, H, W, C)
     """
-    return input.permute(0, 2, 3, 1)
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    return x
 
 
-def bhwc_to_bchw(input: torch.Tensor) -> torch.Tensor:
-    """
-    Permutes a tensor to the shape [batch size, channels, height, width]
-    :param input: (torch.Tensor) Input tensor of the shape [batch size, height, width, channels]
-    :return: (torch.Tensor) Output tensor of the shape [batch size, channels, height, width]
-    """
-    return input.permute(0, 3, 1, 2)
+class WindowAttention(nn.Module):
+    r""" Window based multi-head self attention (W-MSA) module with relative position bias.
+    It supports both of shifted and non-shifted window.
 
-
-def unfold(input: torch.Tensor,
-           window_size: int) -> torch.Tensor:
-    """
-    Unfolds (non-overlapping) a given feature map by the given window size (stride = window size)
-    :param input: (torch.Tensor) Input feature map of the shape [batch size, channels, height, width]
-    :param window_size: (int) Window size to be applied
-    :return: (torch.Tensor) Unfolded tensor of the shape [batch size * windows, channels, window size, window size]
-    """
-    # Get original shape
-    _, channels, height, width = input.shape  # type: int, int, int, int
-    # Unfold input
-    output: torch.Tensor = input.unfold(dimension=3, size=window_size, step=window_size) \
-        .unfold(dimension=2, size=window_size, step=window_size)
-    # Reshape to [batch size * windows, channels, window size, window size]
-    output: torch.Tensor = output.permute(0, 2, 3, 1, 5, 4).reshape(-1, channels, window_size, window_size)
-    return output
-
-
-def fold(input: torch.Tensor,
-         window_size: int,
-         height: int,
-         width: int) -> torch.Tensor:
-    """
-    Fold a tensor of windows again to a 4D feature map
-    :param input: (torch.Tensor) Input tensor of windows [batch size * windows, channels, window size, window size]
-    :param window_size: (int) Window size to be reversed
-    :param height: (int) Height of the feature map
-    :param width: (int) Width of the feature map
-    :return: (torch.Tensor) Folded output tensor of the shape [batch size, channels, height, width]
-    """
-    # Get channels of windows
-    channels: int = input.shape[1]
-    # Get original batch size
-    batch_size: int = int(input.shape[0] // (height * width // window_size // window_size))
-    # Reshape input to
-    output: torch.Tensor = input.view(batch_size, height // window_size, width // window_size, channels,
-                                      window_size, window_size)
-    output: torch.Tensor = output.permute(0, 3, 1, 4, 2, 5).reshape(batch_size, channels, height, width)
-    return output
-
-
-class WindowMultiHeadAttention(nn.Module):
-    """
-    This class implements window-based Multi-Head-Attention.
+    Args:
+        dim (int): Number of input channels.
+        window_size (tuple[int]): The height and width of the window.
+        num_heads (int): Number of attention heads.
+        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+        pretrained_window_size (tuple[int]): The height and width of the window in pre-training.
     """
 
-    def __init__(self,
-                 in_features: int,
-                 window_size: int,
-                 number_of_heads: int,
-                 dropout_attention: float = 0.,
-                 dropout_projection: float = 0.,
-                 meta_network_hidden_features: int = 256,
-                 sequential_self_attention: bool = False) -> None:
-        """
-        Constructor method
-        :param in_features: (int) Number of input features
-        :param window_size: (int) Window size
-        :param number_of_heads: (int) Number of attention heads
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_projection: (float) Dropout rate after projection
-        :param meta_network_hidden_features: (int) Number of hidden features in the two layer MLP meta network
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        """
-        # Call super constructor
-        super(WindowMultiHeadAttention, self).__init__()
-        # Check parameter
-        assert (in_features % number_of_heads) == 0, \
-            "The number of input features (in_features) are not divisible by the number of heads (number_of_heads)."
-        # Save parameters
-        self.in_features: int = in_features
-        self.window_size: int = window_size
-        self.number_of_heads: int = number_of_heads
-        self.sequential_self_attention: bool = sequential_self_attention
-        # Init query, key and value mapping as a single layer
-        self.mapping_qkv: nn.Module = nn.Linear(in_features=in_features, out_features=in_features * 3, bias=True)
-        # Init attention dropout
-        self.attention_dropout: nn.Module = nn.Dropout(dropout_attention)
-        # Init projection mapping
-        self.projection: nn.Module = nn.Linear(in_features=in_features, out_features=in_features, bias=True)
-        # Init projection dropout
-        self.projection_dropout: nn.Module = nn.Dropout(dropout_projection)
-        # Init meta network for positional encodings
-        self.meta_network: nn.Module = nn.Sequential(
-            nn.Linear(in_features=2, out_features=meta_network_hidden_features, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Linear(in_features=meta_network_hidden_features, out_features=number_of_heads, bias=True))
-        # Init tau
-        self.register_parameter("tau", torch.nn.Parameter(torch.ones(1, number_of_heads, 1, 1)))
-        # Init pair-wise relative positions (log-spaced)
-        self.__make_pair_wise_relative_positions()
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.,
+                 pretrained_window_size=[0, 0]):
 
-    def __make_pair_wise_relative_positions(self) -> None:
-        """
-        Method initializes the pair-wise relative positions to compute the positional biases
-        """
-        indexes: torch.Tensor = torch.arange(self.window_size, device=self.tau.device)
-        coordinates: torch.Tensor = torch.stack(torch.meshgrid([indexes, indexes]), dim=0)
-        coordinates: torch.Tensor = torch.flatten(coordinates, start_dim=1)
-        relative_coordinates: torch.Tensor = coordinates[:, :, None] - coordinates[:, None, :]
-        relative_coordinates: torch.Tensor = relative_coordinates.permute(1, 2, 0).reshape(-1, 2).float()
-        relative_coordinates_log: torch.Tensor = torch.sign(relative_coordinates) \
-                                                 * torch.log(1. + relative_coordinates.abs())
-        self.register_buffer("relative_coordinates_log", relative_coordinates_log)
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.pretrained_window_size = pretrained_window_size
+        self.num_heads = num_heads
 
-    def update_resolution(self,
-                          new_window_size: int,
-                          **kwargs: Any) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param kwargs: (Any) Unused
-        """
-        # Set new window size
-        self.window_size: int = new_window_size
-        # Make new pair-wise relative positions
-        self.__make_pair_wise_relative_positions()
+        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))), requires_grad=True)
 
-    def __get_relative_positional_encodings(self) -> torch.Tensor:
-        """
-        Method computes the relative positional encodings
-        :return: (torch.Tensor) Relative positional encodings [1, number of heads, window size ** 2, window size ** 2]
-        """
-        relative_position_bias: torch.Tensor = self.meta_network(self.relative_coordinates_log)
-        relative_position_bias: torch.Tensor = relative_position_bias.permute(1, 0)
-        relative_position_bias: torch.Tensor = relative_position_bias.reshape(self.number_of_heads,
-                                                                              self.window_size * self.window_size,
-                                                                              self.window_size * self.window_size)
-        return relative_position_bias.unsqueeze(0)
+        # mlp to generate continuous relative position bias
+        self.cpb_mlp = nn.Sequential(nn.Linear(2, 512, bias=True),
+                                     nn.ReLU(inplace=True),
+                                     nn.Linear(512, num_heads, bias=False))
 
-    def __self_attention(self,
-                         query: torch.Tensor,
-                         key: torch.Tensor,
-                         value: torch.Tensor,
-                         batch_size_windows: int,
-                         tokens: int,
-                         mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        This function performs standard (non-sequential) scaled cosine self-attention
-        :param query: (torch.Tensor) Query tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param key: (torch.Tensor) Key tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param value: (torch.Tensor) Value tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param batch_size_windows: (int) Size of the first dimension of the input tensor (batch size * windows)
-        :param tokens: (int) Number of tokens in the input
-        :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
-        :return: (torch.Tensor) Output feature map of the shape [batch size * windows, tokens, channels]
-        """
-        # Compute attention map with scaled cosine attention
-        attention_map: torch.Tensor = torch.einsum("bhqd, bhkd -> bhqk", query, key) \
-                                      / torch.maximum(torch.norm(query, dim=-1, keepdim=True)
-                                                      * torch.norm(key, dim=-1, keepdim=True).transpose(-2, -1),
-                                                      torch.tensor(1e-06, device=query.device, dtype=query.dtype))
-        attention_map: torch.Tensor = attention_map / self.tau.clamp(min=0.01)
-        # Apply relative positional encodings
-        attention_map: torch.Tensor = attention_map + self.__get_relative_positional_encodings()
-        # Apply mask if utilized
-        if mask is not None:
-            number_of_windows: int = mask.shape[0]
-            attention_map: torch.Tensor = attention_map.view(batch_size_windows // number_of_windows, number_of_windows,
-                                                             self.number_of_heads, tokens, tokens)
-            attention_map: torch.Tensor = attention_map + mask.unsqueeze(1).unsqueeze(0)
-            attention_map: torch.Tensor = attention_map.view(-1, self.number_of_heads, tokens, tokens)
-        attention_map: torch.Tensor = attention_map.softmax(dim=-1)
-        # Perform attention dropout
-        attention_map: torch.Tensor = self.attention_dropout(attention_map)
-        # Apply attention map and reshape
-        output: torch.Tensor = torch.einsum("bhal, bhlv -> bhav", attention_map, value)
-        output: torch.Tensor = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
-        return output
-
-    def __sequential_self_attention(self,
-                                    query: torch.Tensor,
-                                    key: torch.Tensor,
-                                    value: torch.Tensor,
-                                    batch_size_windows: int,
-                                    tokens: int,
-                                    mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        This function performs sequential scaled cosine self-attention
-        :param query: (torch.Tensor) Query tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param key: (torch.Tensor) Key tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param value: (torch.Tensor) Value tensor of the shape [batch size * windows, heads, tokens, channels // heads]
-        :param batch_size_windows: (int) Size of the first dimension of the input tensor (batch size * windows)
-        :param tokens: (int) Number of tokens in the input
-        :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
-        :return: (torch.Tensor) Output feature map of the shape [batch size * windows, tokens, channels]
-        """
-        # Init output tensor
-        output: torch.Tensor = torch.ones_like(query)
-        # Compute relative positional encodings fist
-        relative_position_bias: torch.Tensor = self.__get_relative_positional_encodings()
-        # Iterate over query and key tokens
-        for token_index_query in range(tokens):
-            # Compute attention map with scaled cosine attention
-            attention_map: torch.Tensor = \
-                torch.einsum("bhd, bhkd -> bhk", query[:, :, token_index_query], key) \
-                / torch.maximum(torch.norm(query[:, :, token_index_query], dim=-1, keepdim=True)
-                                * torch.norm(key, dim=-1, keepdim=False),
-                                torch.tensor(1e-06, device=query.device, dtype=query.dtype))
-            attention_map: torch.Tensor = attention_map / self.tau.clamp(min=0.01)[..., 0]
-            # Apply positional encodings
-            attention_map: torch.Tensor = attention_map + relative_position_bias[..., token_index_query, :]
-            # Apply mask if utilized
-            if mask is not None:
-                number_of_windows: int = mask.shape[0]
-                attention_map: torch.Tensor = attention_map.view(batch_size_windows // number_of_windows,
-                                                                 number_of_windows, self.number_of_heads, 1,
-                                                                 tokens)
-                attention_map: torch.Tensor = attention_map \
-                                              + mask.unsqueeze(1).unsqueeze(0)[..., token_index_query, :].unsqueeze(3)
-                attention_map: torch.Tensor = attention_map.view(-1, self.number_of_heads, tokens)
-            attention_map: torch.Tensor = attention_map.softmax(dim=-1)
-            # Perform attention dropout
-            attention_map: torch.Tensor = self.attention_dropout(attention_map)
-            # Apply attention map and reshape
-            output[:, :, token_index_query] = torch.einsum("bhl, bhlv -> bhv", attention_map, value)
-        output: torch.Tensor = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
-        return output
-
-    def forward(self,
-                input: torch.Tensor,
-                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size * windows, channels, height, width]
-        :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
-        :return: (torch.Tensor) Output tensor of the shape [batch size * windows, channels, height, width]
-        """
-        # Save original shape
-        batch_size_windows, channels, height, width = input.shape  # type: int, int, int, int
-        tokens: int = height * width
-        # Reshape input to [batch size * windows, tokens (height * width), channels]
-        input: torch.Tensor = input.reshape(batch_size_windows, channels, tokens).permute(0, 2, 1)
-        # Perform query, key, and value mapping
-        query_key_value: torch.Tensor = self.mapping_qkv(input)
-        query_key_value: torch.Tensor = query_key_value.view(batch_size_windows, tokens, 3, self.number_of_heads,
-                                                             channels // self.number_of_heads).permute(2, 0, 3, 1, 4)
-        query, key, value = query_key_value[0], query_key_value[1], query_key_value[2]
-        # Perform attention
-        if self.sequential_self_attention:
-            output: torch.Tensor = self.__sequential_self_attention(query=query, key=key, value=value,
-                                                                    batch_size_windows=batch_size_windows,
-                                                                    tokens=tokens,
-                                                                    mask=mask)
+        # get relative_coords_table
+        relative_coords_h = torch.arange(-(self.window_size[0] - 1), self.window_size[0], dtype=torch.float32)
+        relative_coords_w = torch.arange(-(self.window_size[1] - 1), self.window_size[1], dtype=torch.float32)
+        relative_coords_table = torch.stack(
+            torch.meshgrid([relative_coords_h,
+                            relative_coords_w])).permute(1, 2, 0).contiguous().unsqueeze(0)  # 1, 2*Wh-1, 2*Ww-1, 2
+        if pretrained_window_size[0] > 0:
+            relative_coords_table[:, :, :, 0] /= (pretrained_window_size[0] - 1)
+            relative_coords_table[:, :, :, 1] /= (pretrained_window_size[1] - 1)
         else:
-            output: torch.Tensor = self.__self_attention(query=query, key=key, value=value,
-                                                         batch_size_windows=batch_size_windows, tokens=tokens,
-                                                         mask=mask)
-        # Perform linear mapping and dropout
-        output: torch.Tensor = self.projection_dropout(self.projection(output))
-        # Reshape output to original shape [batch size * windows, channels, height, width]
-        output: torch.Tensor = output.permute(0, 2, 1).view(batch_size_windows, channels, height, width)
-        return output
+            relative_coords_table[:, :, :, 0] /= (self.window_size[0] - 1)
+            relative_coords_table[:, :, :, 1] /= (self.window_size[1] - 1)
+        relative_coords_table *= 8  # normalize to -8, 8
+        relative_coords_table = torch.sign(relative_coords_table) * torch.log2(
+            torch.abs(relative_coords_table) + 1.0) / np.log2(8)
+
+        self.register_buffer("relative_coords_table", relative_coords_table)
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        self.register_buffer("relative_position_index", relative_position_index)
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=False)
+        if qkv_bias:
+            self.q_bias = nn.Parameter(torch.zeros(dim))
+            self.v_bias = nn.Parameter(torch.zeros(dim))
+        else:
+            self.q_bias = None
+            self.v_bias = None
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, N, C)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        B_, N, C = x.shape
+        qkv_bias = None
+        if self.q_bias is not None:
+            qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
+        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        qkv = qkv.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+        # cosine attention
+        attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
+        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / 0.01))).exp()
+        attn = attn * logit_scale
+
+        relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
+        relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+        attn = attn + relative_position_bias.unsqueeze(0)
+
+        if mask is not None:
+            nW = mask.shape[0]
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, window_size={self.window_size}, ' \
+               f'pretrained_window_size={self.pretrained_window_size}, num_heads={self.num_heads}'
+
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 3 * self.dim
+        # attn = (q @ k.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        #  x = (attn @ v)
+        flops += self.num_heads * N * N * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
 
 
 class SwinTransformerBlock(nn.Module):
-    """
-    This class implements the Swin transformer block.
+    r""" Swin Transformer Block.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resulotion.
+        num_heads (int): Number of attention heads.
+        window_size (int): Window size.
+        shift_size (int): Shift size for SW-MSA.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float, optional): Stochastic depth rate. Default: 0.0
+        act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+        pretrained_window_size (int): Window size in pre-training.
     """
 
-    def __init__(self,
-                 in_channels: int,
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: int,
-                 window_size: int = 7,
-                 shift_size: int = 0,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: float = 0.0,
-                 sequential_self_attention: bool = False) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
-        :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_path: (float) Dropout in main path
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        """
-        # Call super constructor
-        super(SwinTransformerBlock, self).__init__()
-        # Save parameters
-        self.in_channels: int = in_channels
-        self.input_resolution: Tuple[int, int] = input_resolution
-        # Catch case if resolution is smaller than the window size
-        if min(self.input_resolution) <= window_size:
-            self.window_size: int = min(self.input_resolution)
-            self.shift_size: int = 0
-            self.make_windows: bool = False
-        else:
-            self.window_size: int = window_size
-            self.shift_size: int = shift_size
-            self.make_windows: bool = True
-        # Init normalization layers
-        self.normalization_1: nn.Module = nn.LayerNorm(normalized_shape=in_channels)
-        self.normalization_2: nn.Module = nn.LayerNorm(normalized_shape=in_channels)
-        # Init window attention module
-        self.window_attention: WindowMultiHeadAttention = WindowMultiHeadAttention(
-            in_features=in_channels,
-            window_size=self.window_size,
-            number_of_heads=number_of_heads,
-            dropout_attention=dropout_attention,
-            dropout_projection=dropout,
-            sequential_self_attention=sequential_self_attention)
-        # Init dropout layer
-        self.dropout: nn.Module = timm.models.layers.DropPath(
-            drop_prob=dropout_path) if dropout_path > 0. else nn.Identity()
-        # Init feed-forward network
-        self.feed_forward_network: nn.Module = FeedForward(in_features=in_channels,
-                                                           hidden_features=int(in_channels * ff_feature_ratio),
-                                                           dropout=dropout,
-                                                           out_features=in_channels)
-        # Make attention mask
-        self.__make_attention_mask()
+    def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
+                 mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., drop_path=0.,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, pretrained_window_size=0):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        if min(self.input_resolution) <= self.window_size:
+            # if window size is larger than input resolution, we don't partition windows
+            self.shift_size = 0
+            self.window_size = min(self.input_resolution)
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
-    def __make_attention_mask(self) -> None:
-        """
-        Method generates the attention mask used in shift case
-        """
-        # Make masks for shift case
+        self.norm1 = norm_layer(dim)
+        self.attn = WindowAttention(
+            dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+            qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop,
+            pretrained_window_size=to_2tuple(pretrained_window_size))
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
         if self.shift_size > 0:
-            height, width = self.input_resolution  # type: int, int
-            mask: torch.Tensor = torch.zeros(height, width, device=self.window_attention.tau.device)
-            height_slices: Tuple = (slice(0, -self.window_size),
-                                    slice(-self.window_size, -self.shift_size),
-                                    slice(-self.shift_size, None))
-            width_slices: Tuple = (slice(0, -self.window_size),
-                                   slice(-self.window_size, -self.shift_size),
-                                   slice(-self.shift_size, None))
-            counter: int = 0
-            for height_slice in height_slices:
-                for width_slice in width_slices:
-                    mask[height_slice, width_slice] = counter
-                    counter += 1
-            mask_windows: torch.Tensor = unfold(mask[None, None], self.window_size)
-            mask_windows: torch.Tensor = mask_windows.reshape(-1, self.window_size * self.window_size)
-            attention_mask: Optional[torch.Tensor] = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attention_mask: Optional[torch.Tensor] = attention_mask.masked_fill(attention_mask != 0, float(-100.0))
-            attention_mask: Optional[torch.Tensor] = attention_mask.masked_fill(attention_mask == 0, float(0.0))
-        else:
-            attention_mask: Optional[torch.Tensor] = None
-        # Save mask
-        self.register_buffer("attention_mask", attention_mask)
+            # calculate attention mask for SW-MSA
+            H, W = self.input_resolution
+            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
+            h_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            w_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            cnt = 0
+            for h in h_slices:
+                for w in w_slices:
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
 
-    def update_resolution(self,
-                          new_window_size: int,
-                          new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        # Update input resolution
-        self.input_resolution: Tuple[int, int] = new_input_resolution
-        # Catch case if resolution is smaller than the window size
-        if min(self.input_resolution) <= new_window_size:
-            self.window_size: int = min(self.input_resolution)
-            self.shift_size: int = 0
-            self.make_windows: bool = False
+            mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
         else:
-            self.window_size: int = new_window_size
-            self.shift_size: int = self.shift_size
-            self.make_windows: bool = True
-        # Update attention mask
-        self.__make_attention_mask()
-        # Update attention module
-        self.window_attention.update_resolution(new_window_size=new_window_size)
+            attn_mask = None
 
-    def forward(self,
-                input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size, in channels, height, width]
-        :return: (torch.Tensor) Output tensor of the shape [batch size, in channels, height, width]
-        """
-        # Save shape
-        batch_size, channels, height, width = input.shape  # type: int, int, int, int
-        # Shift input if utilized
+        self.register_buffer("attn_mask", attn_mask)
+
+    def forward(self, x):
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+
+        shortcut = x
+        x = x.view(B, H, W, C)
+
+        # cyclic shift
         if self.shift_size > 0:
-            output_shift: torch.Tensor = torch.roll(input=input, shifts=(-self.shift_size, -self.shift_size),
-                                                    dims=(-1, -2))
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
-            output_shift: torch.Tensor = input
-        # Make patches
-        output_patches: torch.Tensor = unfold(input=output_shift, window_size=self.window_size) \
-            if self.make_windows else output_shift
-        # Perform window attention
-        output_attention: torch.Tensor = self.window_attention(output_patches, mask=self.attention_mask)
-        # Merge patches
-        output_merge: torch.Tensor = fold(input=output_attention, window_size=self.window_size, height=height,
-                                          width=width) if self.make_windows else output_attention
-        # Reverse shift if utilized
+            shifted_x = x
+
+        # partition windows
+        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+
+        # W-MSA/SW-MSA
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+
+        # merge windows
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+
+        # reverse cyclic shift
         if self.shift_size > 0:
-            output_shift: torch.Tensor = torch.roll(input=output_merge, shifts=(self.shift_size, self.shift_size),
-                                                    dims=(-1, -2))
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
-            output_shift: torch.Tensor = output_merge
-        # Perform normalization
-        output_normalize: torch.Tensor = self.normalization_1(output_shift.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # Skip connection
-        output_skip: torch.Tensor = self.dropout(output_normalize) + input
-        # Feed forward network, normalization and skip connection
-        output_feed_forward: torch.Tensor = self.feed_forward_network(
-            output_skip.view(batch_size, channels, -1).permute(0, 2, 1)).permute(0, 2, 1)
-        output_feed_forward: torch.Tensor = output_feed_forward.view(batch_size, channels, height, width)
-        output_normalize: torch.Tensor = bhwc_to_bchw(self.normalization_2(bchw_to_bhwc(output_feed_forward)))
-        output: torch.Tensor = output_skip + self.dropout(output_normalize)
-        return output
+            x = shifted_x
+        x = x.view(B, H * W, C)
+        x = shortcut + self.drop_path(self.norm1(x))
 
+        # FFN
+        x = x + self.drop_path(self.norm2(self.mlp(x)))
 
-class DeformableSwinTransformerBlock(SwinTransformerBlock):
-    """
-    This class implements a deformable version of the Swin Transformer block.
-    Inspired by: https://arxiv.org/pdf/2201.00520.pdf
-    """
+        return x
 
-    def __init__(self,
-                 in_channels: int,
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: int,
-                 window_size: int = 7,
-                 shift_size: int = 0,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: float = 0.0,
-                 sequential_self_attention: bool = False,
-                 offset_downscale_factor: int = 2) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
-        :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_path: (float) Dropout in main path
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        :param offset_downscale_factor: (int) Downscale factor of offset network
-        """
-        # Call super constructor
-        super(DeformableSwinTransformerBlock, self).__init__(
-            in_channels=in_channels,
-            input_resolution=input_resolution,
-            number_of_heads=number_of_heads,
-            window_size=window_size,
-            shift_size=shift_size,
-            ff_feature_ratio=ff_feature_ratio,
-            dropout=dropout,
-            dropout_attention=dropout_attention,
-            dropout_path=dropout_path,
-            sequential_self_attention=sequential_self_attention
-        )
-        # Save parameter
-        self.offset_downscale_factor: int = offset_downscale_factor
-        self.number_of_heads: int = number_of_heads
-        # Make default offsets
-        self.__make_default_offsets()
-        # Init offset network
-        self.offset_network: nn.Module = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=5, stride=offset_downscale_factor,
-                      padding=3, groups=in_channels, bias=True),
-            nn.GELU(),
-            nn.Conv2d(in_channels=in_channels, out_channels=2 * self.number_of_heads, kernel_size=1, stride=1,
-                      padding=0, bias=True)
-        )
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
+               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
 
-    def __make_default_offsets(self) -> None:
-        """
-        Method generates the default sampling grid (inspired by kornia)
-        """
-        # Init x and y coordinates
-        x: torch.Tensor = torch.linspace(0, self.input_resolution[1] - 1, self.input_resolution[1],
-                                         device=self.window_attention.tau.device)
-        y: torch.Tensor = torch.linspace(0, self.input_resolution[0] - 1, self.input_resolution[0],
-                                         device=self.window_attention.tau.device)
-        # Normalize coordinates to a range of [-1, 1]
-        x: torch.Tensor = (x / (self.input_resolution[1] - 1) - 0.5) * 2
-        y: torch.Tensor = (y / (self.input_resolution[0] - 1) - 0.5) * 2
-        # Make grid [2, height, width]
-        grid: torch.Tensor = torch.stack(torch.meshgrid([x, y])).transpose(1, 2)
-        # Reshape grid to [1, height, width, 2]
-        grid: torch.Tensor = grid.unsqueeze(dim=0).permute(0, 2, 3, 1)
-        # Register in module
-        self.register_buffer("default_grid", grid)
-
-    def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        # Update resolution and window size
-        super(DeformableSwinTransformerBlock, self).update_resolution(new_window_size=new_window_size,
-                                                                      new_input_resolution=new_input_resolution)
-        # Update default sampling grid
-        self.__make_default_offsets()
-
-    def forward(self,
-                input: torch.Tensor) -> torch.Tensor:
-        # Get input shape
-        batch_size, channels, height, width = input.shape
-        # Compute offsets of the shape [batch size, 2, height / r, width / r]
-        offsets: torch.Tensor = self.offset_network(input)
-        # Upscale offsets to the shape [batch size, 2 * number of heads, height, width]
-        offsets: torch.Tensor = F.interpolate(input=offsets,
-                                              size=(height, width), mode="bilinear", align_corners=True)
-        # Reshape offsets to [batch size, number of heads, height, width, 2]
-        offsets: torch.Tensor = offsets.reshape(batch_size, -1, 2, height, width).permute(0, 1, 3, 4, 2)
-        # Flatten batch size and number of heads and apply tanh
-        offsets: torch.Tensor = offsets.view(-1, height, width, 2).tanh()
-        # Cast offset grid to input data type
-        if input.dtype != self.default_grid.dtype:
-            self.default_grid = self.default_grid.type(input.dtype)
-        # Construct offset grid
-        offset_grid: torch.Tensor = self.default_grid.repeat_interleave(repeats=offsets.shape[0], dim=0) + offsets
-        # Reshape input to [batch size * number of heads, channels / number of heads, height, width]
-        input: torch.Tensor = input.view(batch_size, self.number_of_heads, channels // self.number_of_heads, height,
-                                         width).flatten(start_dim=0, end_dim=1)
-        # Apply sampling grid
-        input_resampled: torch.Tensor = F.grid_sample(input=input, grid=offset_grid.clip(min=-1, max=1),
-                                                      mode="bilinear", align_corners=True, padding_mode="reflection")
-        # Reshape resampled tensor again to [batch size, channels, height, width]
-        input_resampled: torch.Tensor = input_resampled.view(batch_size, channels, height, width)
-        return super(DeformableSwinTransformerBlock, self).forward(input=input_resampled)
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # W-MSA/SW-MSA
+        nW = H * W / self.window_size / self.window_size
+        flops += nW * self.attn.flops(self.window_size * self.window_size)
+        # mlp
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
 
 
 class PatchMerging(nn.Module):
-    """
-    This class implements the patch merging approach which is essential a strided convolution with normalization before
-    """
+    r""" Patch Merging Layer.
 
-    def __init__(self,
-                 in_channels: int) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        """
-        # Call super constructor
-        super(PatchMerging, self).__init__()
-        # Init normalization
-        self.normalization: nn.Module = nn.LayerNorm(normalized_shape=4 * in_channels)
-        # Init linear mapping
-        self.linear_mapping: nn.Module = nn.Linear(in_features=4 * in_channels, out_features=2 * in_channels,
-                                                   bias=False)
-
-    def forward(self,
-                input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size, in channels, height, width]
-        :return: (torch.Tensor) Output tensor of the shape [batch size, 2 * in channels, height // 2, width // 2]
-        """
-        # Get original shape
-        batch_size, channels, height, width = input.shape  # type: int, int, int, int
-        # Reshape input to [batch size, in channels, height, width]
-        input: torch.Tensor = bchw_to_bhwc(input)
-        # Unfold input
-        input: torch.Tensor = input.unfold(dimension=1, size=2, step=2).unfold(dimension=2, size=2, step=2)
-        input: torch.Tensor = input.reshape(batch_size, input.shape[1], input.shape[2], -1)
-        # Normalize input
-        input: torch.Tensor = self.normalization(input)
-        # Perform linear mapping
-        output: torch.Tensor = bhwc_to_bchw(self.linear_mapping(input))
-        return output
-
-
-class PatchEmbedding(nn.Module):
-    """
-    Module embeds a given image into patch embeddings.
+    Args:
+        input_resolution (tuple[int]): Resolution of input feature.
+        dim (int): Number of input channels.
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self,
-                 in_channels: int = 3,
-                 out_channels: int = 96,
-                 patch_size: int = 4) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param out_channels: (int) Number of output channels
-        :param patch_size: (int) Patch size to be utilized
-        :param image_size: (int) Image size to be used
-        """
-        # Call super constructor
-        super(PatchEmbedding, self).__init__()
-        # Save parameters
-        self.out_channels: int = out_channels
-        # Init linear embedding as a convolution
-        self.linear_embedding: nn.Module = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                                     kernel_size=(patch_size, patch_size),
-                                                     stride=(patch_size, patch_size))
-        # Init layer normalization
-        self.normalization: nn.Module = nn.LayerNorm(normalized_shape=out_channels)
+    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
+        self.norm = norm_layer(2 * dim)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         """
-        Forward pass transforms a given batch of images into a patch embedding
-        :param input: (torch.Tensor) Input images of the shape [batch size, in channels, height, width]
-        :return: (torch.Tensor) Patch embedding of the shape [batch size, patches + 1, out channels]
+        x: B, H*W, C
         """
-        # Perform linear embedding
-        embedding: torch.Tensor = self.linear_embedding(input)
-        # Perform normalization
-        embedding: torch.Tensor = bhwc_to_bchw(self.normalization(bchw_to_bhwc(embedding)))
-        return embedding
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+
+        x = x.view(B, H, W, C)
+
+        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+        x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
+
+        x = self.reduction(x)
+        x = self.norm(x)
+
+        return x
+
+    def extra_repr(self) -> str:
+        return f"input_resolution={self.input_resolution}, dim={self.dim}"
+
+    def flops(self):
+        H, W = self.input_resolution
+        flops = (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
+        flops += H * W * self.dim // 2
+        return flops
 
 
-class SwinTransformerStage(nn.Module):
+class BasicLayer(nn.Module):
+    """ A basic Swin Transformer layer for one stage.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resolution.
+        depth (int): Number of blocks.
+        num_heads (int): Number of attention heads.
+        window_size (int): Local window size.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
+        norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+        pretrained_window_size (int): Local window size in pre-training.
     """
-    This class implements a stage of the Swin transformer including multiple layers.
-    """
 
-    def __init__(self,
-                 in_channels: int,
-                 depth: int,
-                 downscale: bool,
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: int,
-                 window_size: int = 7,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: Union[List[float], float] = 0.0,
-                 use_checkpoint: bool = False,
-                 sequential_self_attention: bool = False,
-                 use_deformable_block: bool = False) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param depth: (int) Depth of the stage (number of layers)
-        :param downscale: (bool) If true input is downsampled (see Fig. 3 or V1 paper)
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
-        :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_path: (float) Dropout in main path
-        :param use_checkpoint: (bool) If true checkpointing is utilized
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        :param use_deformable_block: (bool) If true deformable block is used
-        """
-        # Call super constructor
-        super(SwinTransformerStage, self).__init__()
-        # Save parameters
-        self.use_checkpoint: bool = use_checkpoint
-        self.downscale: bool = downscale
-        # Init downsampling
-        self.downsample: nn.Module = PatchMerging(in_channels=in_channels) if downscale else nn.Identity()
-        # Update resolution and channels
-        self.input_resolution: Tuple[int, int] = (input_resolution[0] // 2, input_resolution[1] // 2) \
-            if downscale else input_resolution
-        in_channels = in_channels * 2 if downscale else in_channels
-        # Get block
-        block = DeformableSwinTransformerBlock if use_deformable_block else SwinTransformerBlock
-        # Init blocks
-        self.blocks: nn.ModuleList = nn.ModuleList([
-            block(in_channels=in_channels,
-                  input_resolution=self.input_resolution,
-                  number_of_heads=number_of_heads,
-                  window_size=window_size,
-                  shift_size=0 if ((index % 2) == 0) else window_size // 2,
-                  ff_feature_ratio=ff_feature_ratio,
-                  dropout=dropout,
-                  dropout_attention=dropout_attention,
-                  dropout_path=dropout_path[index] if isinstance(dropout_path, list) else dropout_path,
-                  sequential_self_attention=sequential_self_attention)
-            for index in range(depth)])
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size,
+                 mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
+                 pretrained_window_size=0):
 
-    def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        # Update resolution
-        self.input_resolution: Tuple[int, int] = (new_input_resolution[0] // 2, new_input_resolution[1] // 2) \
-            if self.downscale else new_input_resolution
-        # Update resolution of each block
-        for block in self.blocks:  # type: SwinTransformerBlock
-            block.update_resolution(new_window_size=new_window_size, new_input_resolution=self.input_resolution)
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.depth = depth
+        self.use_checkpoint = use_checkpoint
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size, channels, height, width]
-        :return: (torch.Tensor) Output tensor of the shape [batch size, 2 * channels, height // 2, width // 2]
-        """
-        # Downscale input tensor
-        output: torch.Tensor = self.downsample(input)
-        # Forward pass of each block
-        for block in self.blocks:  # type: nn.Module
-            # Perform checkpointing if utilized
+        # build blocks
+        self.blocks = nn.ModuleList([
+            SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
+                                 num_heads=num_heads, window_size=window_size,
+                                 shift_size=0 if (i % 2 == 0) else window_size // 2,
+                                 mlp_ratio=mlp_ratio,
+                                 qkv_bias=qkv_bias,
+                                 drop=drop, attn_drop=attn_drop,
+                                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                                 norm_layer=norm_layer,
+                                 pretrained_window_size=pretrained_window_size)
+            for i in range(depth)])
+
+        # patch merging layer
+        if downsample is not None:
+            self.downsample = downsample(input_resolution, dim=dim, norm_layer=norm_layer)
+        else:
+            self.downsample = None
+
+    def forward(self, x):
+        for blk in self.blocks:
             if self.use_checkpoint:
-                output: torch.Tensor = checkpoint.checkpoint(block, output)
+                x = checkpoint.checkpoint(blk, x)
             else:
-                output: torch.Tensor = block(output)
-        return output
-    
-__all__: List[str] = ["SwinTransformerV2"]
+                x = blk(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
+
+    def flops(self):
+        flops = 0
+        for blk in self.blocks:
+            flops += blk.flops()
+        if self.downsample is not None:
+            flops += self.downsample.flops()
+        return flops
+
+    def _init_respostnorm(self):
+        for blk in self.blocks:
+            nn.init.constant_(blk.norm1.bias, 0)
+            nn.init.constant_(blk.norm1.weight, 0)
+            nn.init.constant_(blk.norm2.bias, 0)
+            nn.init.constant_(blk.norm2.weight, 0)
+
+
+class PatchEmbed(nn.Module):
+    r""" Image to Patch Embedding
+
+    Args:
+        img_size (int): Image size.  Default: 224.
+        patch_size (int): Patch token size. Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        embed_dim (int): Number of linear projection output channels. Default: 96.
+        norm_layer (nn.Module, optional): Normalization layer. Default: None
+    """
+
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.patches_resolution = patches_resolution
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
+
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        if norm_layer is not None:
+            self.norm = norm_layer(embed_dim)
+        else:
+            self.norm = None
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # FIXME look at relaxing size constraints
+        assert H == self.img_size[0] and W == self.img_size[1], \
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+    def flops(self):
+        Ho, Wo = self.patches_resolution
+        flops = Ho * Wo * self.embed_dim * self.in_chans * (self.patch_size[0] * self.patch_size[1])
+        if self.norm is not None:
+            flops += Ho * Wo * self.embed_dim
+        return flops
+
 
 class SwinTransformerV2(nn.Module):
+    r""" Swin Transformer
+        A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
+          https://arxiv.org/pdf/2103.14030
+
+    Args:
+        img_size (int | tuple(int)): Input image size. Default 224
+        patch_size (int | tuple(int)): Patch size. Default: 4
+        in_chans (int): Number of input image channels. Default: 3
+        num_classes (int): Number of classes for classification head. Default: 1000
+        embed_dim (int): Patch embedding dimension. Default: 96
+        depths (tuple(int)): Depth of each Swin Transformer layer.
+        num_heads (tuple(int)): Number of attention heads in different layers.
+        window_size (int): Window size. Default: 7
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
+        qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
+        drop_rate (float): Dropout rate. Default: 0
+        attn_drop_rate (float): Attention dropout rate. Default: 0
+        drop_path_rate (float): Stochastic depth rate. Default: 0.1
+        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
+        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
+        patch_norm (bool): If True, add normalization after patch embedding. Default: True
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
+        pretrained_window_sizes (tuple(int)): Pretrained window sizes of each layer.
     """
-    This class implements the Swin Transformer without classification head.
-    """
 
-    def __init__(self,
-                 in_channels: int,
-                 embedding_channels: int,
-                 depths: Tuple[int, ...],
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: Tuple[int, ...],
-                 window_size: int = 7,
-                 patch_size: int = 4,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: float = 0.2,
-                 use_checkpoint: bool = False,
-                 sequential_self_attention: bool = False,
-                 use_deformable_block: bool = False) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param depth: (int) Depth of the stage (number of layers)
-        :param downscale: (bool) If true input is downsampled (see Fig. 3 or V1 paper)
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
-        :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_path: (float) Dropout in main path
-        :param use_checkpoint: (bool) If true checkpointing is utilized
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        :param use_deformable_block: (bool) If true deformable block is used
-        """
-        # Call super constructor
-        super(SwinTransformerV2, self).__init__()
-        # Save parameters
-        self.patch_size: int = patch_size
-        # Init patch embedding
-        self.patch_embedding: nn.Module = PatchEmbedding(in_channels=in_channels, out_channels=embedding_channels,
-                                                         patch_size=patch_size)
-        # Compute patch resolution
-        patch_resolution: Tuple[int, int] = (input_resolution[0] // patch_size, input_resolution[1] // patch_size)
-        # Path dropout dependent on depth
-        dropout_path = torch.linspace(0., dropout_path, sum(depths)).tolist()
-        # Init stages
-        self.stages: nn.ModuleList = nn.ModuleList()
-        for index, (depth, number_of_head) in enumerate(zip(depths, number_of_heads)):
-            self.stages.append(
-                SwinTransformerStage(
-                    in_channels=embedding_channels * (2 ** max(index - 1, 0)),
-                    depth=depth,
-                    downscale=not (index == 0),
-                    input_resolution=(patch_resolution[0] // (2 ** max(index - 1, 0)),
-                                      patch_resolution[1] // (2 ** max(index - 1, 0))),
-                    number_of_heads=number_of_head,
-                    window_size=window_size,
-                    ff_feature_ratio=ff_feature_ratio,
-                    dropout=dropout,
-                    dropout_attention=dropout_attention,
-                    dropout_path=dropout_path[sum(depths[:index]):sum(depths[:index + 1])],
-                    use_checkpoint=use_checkpoint,
-                    sequential_self_attention=sequential_self_attention,
-                    use_deformable_block=use_deformable_block and (index > 0)
-                ))
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
+                 embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 window_size=7, mlp_ratio=4., qkv_bias=True,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
+                 use_checkpoint=False, pretrained_window_sizes=[0, 0, 0, 0], **kwargs):
+        super().__init__()
 
-    def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        # Compute new patch resolution
-        new_patch_resolution: Tuple[int, int] = (new_input_resolution[0] // self.patch_size,
-                                                 new_input_resolution[1] // self.patch_size)
-        # Update resolution of each stage
-        for index, stage in enumerate(self.stages):  # type: int, SwinTransformerStage
-            stage.update_resolution(new_window_size=new_window_size,
-                                    new_input_resolution=(new_patch_resolution[0] // (2 ** max(index - 1, 0)),
-                                                          new_patch_resolution[1] // (2 ** max(index - 1, 0))))
+        self.num_classes = num_classes
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.ape = ape
+        self.patch_norm = patch_norm
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+        self.mlp_ratio = mlp_ratio
 
-    def forward(self, input: torch.Tensor) -> List[torch.Tensor]:
+        # split image into non-overlapping patches
+        self.patch_embed = PatchEmbed(
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None)
+        num_patches = self.patch_embed.num_patches
+        patches_resolution = self.patch_embed.patches_resolution
+        self.patches_resolution = patches_resolution
+
+        # absolute position embedding
+        if self.ape:
+            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+            trunc_normal_(self.absolute_pos_embed, std=.02)
+
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        # stochastic depth
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+
+        # build layers
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+                               input_resolution=(patches_resolution[0] // (2 ** i_layer),
+                                                 patches_resolution[1] // (2 ** i_layer)),
+                               depth=depths[i_layer],
+                               num_heads=num_heads[i_layer],
+                               window_size=window_size,
+                               mlp_ratio=self.mlp_ratio,
+                               qkv_bias=qkv_bias,
+                               drop=drop_rate, attn_drop=attn_drop_rate,
+                               drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                               norm_layer=norm_layer,
+                               downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                               use_checkpoint=use_checkpoint,
+                               pretrained_window_size=pretrained_window_sizes[i_layer])
+            self.layers.append(layer)
+
+        self.norm_layers = nn.ModuleList([
+            norm_layer(int(embed_dim * 2 ** i)) for i in range(self.num_layers)
+        ])
+
+        self.apply(self._init_weights)
+        for bly in self.layers:
+            bly._init_respostnorm()
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'absolute_pos_embed'}
+
+    @torch.jit.ignore
+    def no_weight_decay_keywords(self):
+        return {"cpb_mlp", "logit_scale", 'relative_position_bias_table'}
+
+    def forward(self, x: torch.Tensor):
         """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor
-        :return: (List[torch.Tensor]) List of features from each stage
+        Args:
+            x: input tensor (B, C, H, W)
+        Returns:
+            List[torch.Tensor]: features from each stage
+                [
+                    [B, C1, H/4,  W/4 ],
+                    [B, C2, H/8,  W/8 ],
+                    [B, C3, H/16, W/16],
+                    [B, C4, H/32, W/32]
+                ]
         """
-        # Perform patch embedding
-        output: torch.Tensor = self.patch_embedding(input)
-        # Init list to store feature
-        features: List[torch.Tensor] = []
-        # Forward pass of each stage
-        for stage in self.stages:
-            output: torch.Tensor = stage(output)
-            features.append(output)
+        x = self.patch_embed(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x)
+
+        # Trả về features của từng stage
+        features = []
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            # convert (B, L, C) → (B, C, H, W)
+            B, L, C = x.shape
+            H, W = self.patches_resolution[0] // (2 ** i), self.patches_resolution[1] // (2 ** i)
+            x = x.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+            x = self.norm_layers[i](x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            features.append(x)
+
         return features
 
-
-def swin_transformer_v2_t(input_resolution: Tuple[int, int],
-                          window_size: int = 7,
-                          in_channels: int = 3,
-                          use_checkpoint: bool = False,
-                          sequential_self_attention: bool = False,
-                          **kwargs) -> SwinTransformerV2:
-    """
-    Function returns a tiny Swin Transformer V2 (SwinV2-T: C = 96, layer numbers = {2, 2, 6, 2}) for feature extraction
-    :param input_resolution: (Tuple[int, int]) Input resolution
-    :param window_size: (int) Window size to be utilized
-    :param in_channels: (int) Number of input channels
-    :param use_checkpoint: (bool) If true checkpointing is utilized
-    :param sequential_self_attention: (bool) If true sequential self-attention is performed
-    :return: (SwinTransformerV2) Tiny Swin Transformer V2
-    """
-    return SwinTransformerV2(input_resolution=input_resolution,
-                             window_size=window_size,
-                             in_channels=in_channels,
-                             use_checkpoint=use_checkpoint,
-                             sequential_self_attention=sequential_self_attention,
-                             embedding_channels=96,
-                             depths=(2, 2, 6, 2),
-                             number_of_heads=(3, 6, 12, 24),
-                             **kwargs)
+    def flops(self):
+        flops = 0
+        flops += self.patch_embed.flops()
+        for i, layer in enumerate(self.layers):
+            flops += layer.flops()
+        flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2 ** self.num_layers)
+        flops += self.num_features * self.num_classes
+        return flops
