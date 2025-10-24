@@ -526,10 +526,10 @@ class SwinTransformerV2(nn.Module):
         pretrained_window_sizes (tuple(int)): Pretrained window sizes of each layer.
     """
 
-    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
+    def __init__(self, img_size=384, patch_size=8, in_chans=3, num_classes=1000,
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
-                 window_size=7, mlp_ratio=4., qkv_bias=True,
-                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 window_size=8, mlp_ratio=4., qkv_bias=True,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  use_checkpoint=False, pretrained_window_sizes=[0, 0, 0, 0], **kwargs):
         super().__init__()
