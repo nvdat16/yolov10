@@ -939,8 +939,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             for c in c2:
                 ch.append(c)
         elif m is SwinTransformerV2:
-            cswin = SwinTransformerV2(*args)
-            c2 = list(cswin.out_channels)  # lấy đúng out_channels từ SwinTransformerV2
+            swin = SwinTransformerV2(*args)
+            c2 = list(swin.norm_layers)  # lấy đúng out_channels từ SwinTransformerV2
             for c in c2:
                 ch.append(c)
         elif m is Stage:
