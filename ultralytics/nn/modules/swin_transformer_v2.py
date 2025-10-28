@@ -583,6 +583,8 @@ class SwinTransformerV2(nn.Module):
             norm_layer(int(embed_dim * 2 ** i)) for i in range(self.num_layers)
         ])
 
+        self.out_channels = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
+
         self.apply(self._init_weights)
         for bly in self.layers:
             bly._init_respostnorm()
