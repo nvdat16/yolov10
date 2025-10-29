@@ -579,13 +579,6 @@ class SwinTransformerV2(nn.Module):
                                pretrained_window_size=pretrained_window_sizes[i_layer])
             self.layers.append(layer)
 
-        self.norm_layers = nn.ModuleList([
-            nn.LayerNorm(embed_dim),
-            nn.LayerNorm(embed_dim * 2),
-            nn.LayerNorm(embed_dim * 4),
-            nn.LayerNorm(embed_dim * 8),
-        ])
-
         self.out_channels = [embed_dim, embed_dim * 2, embed_dim * 4, embed_dim * 8]
 
         self.apply(self._init_weights)
@@ -610,28 +603,22 @@ class SwinTransformerV2(nn.Module):
         return {"cpb_mlp", "logit_scale", 'relative_position_bias_table'}
 
     def forward(self, x: torch.Tensor):
-        """
-        Args:
-            x: input tensor (B, C, H, W)
-        Returns:
-            List[torch.Tensor]: features from each stage
-                [
-                    [B, C1, H/4,  W/4 ],
-                    [B, C2, H/8,  W/8 ],
-                    [B, C3, H/16, W/16],
-                    [B, C4, H/32, W/32]
-                ]
-        """
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
-        # Trả về features của từng stage
         features = []
+        
         for i, layer in enumerate(self.layers):
             x = layer(x)
             features.append(x)
+            
+            # Debug thông tin
+            B, L, C = x.shape
+            H = self.patches_resolution[0] // (2 ** (i + 1))
+            W = self.patches_resolution[1] // (2 ** (i + 1))
+            print(f"Stage {i}: shape={x.shape}, expected HxW={H}x{W} = {H*W}")
 
         return features
 
