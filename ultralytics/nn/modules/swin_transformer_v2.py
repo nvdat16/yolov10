@@ -563,28 +563,46 @@ class SwinTransformerV2(nn.Module):
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
+            # Tính resolution chính xác cho từng layer
             if i_layer == 0:
-                # Layer đầu tiên: KHÔNG downsample
+                # Layer đầu: resolution từ patch_embed
+                layer_resolution = (patches_resolution[0], patches_resolution[1])
+                layer_dim = embed_dim
                 downsample = None
-            elif i_layer < self.num_layers - 1:
+            elif i_layer == 1:
+                # Layer 2: sau patch merging đầu tiên
+                layer_resolution = (patches_resolution[0] // 2, patches_resolution[1] // 2)
+                layer_dim = embed_dim * 2
+                downsample = PatchMerging
+            elif i_layer == 2:
+                # Layer 3: sau patch merging thứ hai
+                layer_resolution = (patches_resolution[0] // 4, patches_resolution[1] // 4)
+                layer_dim = embed_dim * 4
                 downsample = PatchMerging
             else:
-                downsample = None
-
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
-                               input_resolution=(patches_resolution[0] // (2 ** i_layer),
-                                                 patches_resolution[1] // (2 ** i_layer)),
-                               depth=depths[i_layer],
-                               num_heads=num_heads[i_layer],
-                               window_size=window_size,
-                               mlp_ratio=self.mlp_ratio,
-                               qkv_bias=qkv_bias,
-                               drop=drop_rate, attn_drop=attn_drop_rate,
-                               drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                               norm_layer=norm_layer,
-                               downsample=downsample,
-                               use_checkpoint=use_checkpoint,
-                               pretrained_window_size=pretrained_window_sizes[i_layer])
+                # Layer 4: sau patch merging thứ ba
+                layer_resolution = (patches_resolution[0] // 8, patches_resolution[1] // 8)
+                layer_dim = embed_dim * 8
+                downsample = PatchMerging
+            
+            print(f"Layer {i_layer}: resolution={layer_resolution}, dim={layer_dim}, downsample={downsample is not None}")
+            
+            layer = BasicLayer(
+                dim=layer_dim,
+                input_resolution=layer_resolution,
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                mlp_ratio=self.mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop=drop_rate, 
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=downsample,
+                use_checkpoint=use_checkpoint,
+                pretrained_window_size=pretrained_window_sizes[i_layer]
+            )
             self.layers.append(layer)
 
         self.out_channels = [embed_dim, embed_dim * 2, embed_dim * 4, embed_dim * 8]
@@ -617,16 +635,10 @@ class SwinTransformerV2(nn.Module):
         x = self.pos_drop(x)
 
         features = []
-        
-        for i, layer in enumerate(self.layers):
+
+        for layer in self.layers:
             x = layer(x)
             features.append(x)
-            
-            # Debug thông tin
-            B, L, C = x.shape
-            H = self.patches_resolution[0] // (2 ** (i + 1))
-            W = self.patches_resolution[1] // (2 ** (i + 1))
-            print(f"Stage {i}: shape={x.shape}, expected HxW={H}x{W} = {H*W}")
 
         return features
 
