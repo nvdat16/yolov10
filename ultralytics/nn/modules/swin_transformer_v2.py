@@ -588,13 +588,10 @@ class SwinTransformerV2(nn.Module):
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            if i_layer == 0:
-                input_resolution = (patches_resolution[0], patches_resolution[1])
-            else:
-                input_resolution = (patches_resolution[0] // (2 ** i_layer),
-                                    patches_resolution[1] // (2 ** i_layer))
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
-                               input_resolution=input_resolution,
+                               input_resolution=(patches_resolution[0] // (2 ** (i_layer-1)),
+                                                 patches_resolution[1] // (2 ** (i_layer-1))) 
+                                                 if i_layer > 0 else patches_resolution,
                                depth=depths[i_layer],
                                num_heads=num_heads[i_layer],
                                window_size=window_size,
