@@ -563,6 +563,14 @@ class SwinTransformerV2(nn.Module):
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
+            if i_layer == 0:
+                # Layer đầu tiên: KHÔNG downsample
+                downsample = None
+            elif i_layer < self.num_layers - 1:
+                downsample = PatchMerging
+            else:
+                downsample = None
+
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
                                input_resolution=(patches_resolution[0] // (2 ** i_layer),
                                                  patches_resolution[1] // (2 ** i_layer)),
@@ -574,7 +582,7 @@ class SwinTransformerV2(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                               downsample=downsample,
                                use_checkpoint=use_checkpoint,
                                pretrained_window_size=pretrained_window_sizes[i_layer])
             self.layers.append(layer)
