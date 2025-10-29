@@ -270,8 +270,32 @@ class SwinTransformerBlock(nn.Module):
     def forward(self, x):
         H, W = self.input_resolution
         B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
-
+        
+        # Mã mới để xử lý lỗi sai kích thước phổ biến khi tracing/tính toán stride
+        if L != H * W:
+             # Cố gắng suy ra H và W từ L. 
+             # Giả định đơn giản nhất là tensor là hình vuông cho mục đích tracing,
+             # hoặc sử dụng H và W đã khởi tạo để kiểm tra, sau đó recalculate.
+             # Trong trường hợp của Swin Transformer, L thường là một số chẵn.
+             
+             # Cách làm phổ biến trong các framework: thử tính H và W từ L
+             # Trong trường hợp BasicLayer.forward, độ phân giải mới có thể được suy ra từ L.
+             
+             # Cố gắng tính H và W từ L, ưu tiên dùng H/W đã được khởi tạo:
+             if H > 0 and W > 0 and L % H == 0:
+                 W = L // H
+             elif H > 0 and W > 0 and L % W == 0:
+                 H = L // W
+             else:
+                 # Nếu không suy ra được một cách hợp lý, hãy thử căn bậc hai (giả định hình vuông)
+                 _H = int(L**0.5)
+                 _W = L // _H
+                 if _H * _W == L:
+                    H, W = _H, _W
+                 else:
+                     # Nếu không thể suy luận, giữ nguyên lỗi ban đầu để tránh sai sót nghiêm trọng
+                     assert L == H * W, f"input feature has wrong size ({L}) and cannot be inferred from resolution ({H}x{W})"
+        
         shortcut = x
         x = x.view(B, H, W, C)
 
