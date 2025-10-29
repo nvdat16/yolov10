@@ -633,7 +633,7 @@ class SwinTransformerV2(nn.Module):
             x = layer(x)
             # convert (B, L, C) → (B, C, H, W)
             B, L, C = x.shape
-            H, W = self.patches_resolution[0] // (2 ** i), self.patches_resolution[1] // (2 ** i)
+            H = W = int(L ** 0.5)
             x = x.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
             x = self.norm_layers[i](x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
             features.append(x)
