@@ -635,6 +635,12 @@ class SwinTransformerV2(nn.Module):
             B, L, C = x.shape
             H = W = int(L ** 0.5)
             x = x.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+
+            expected_c = self.out_channels[i]
+            if C != expected_c:
+                raise RuntimeError(f"[SwinTransformerV2] Stage {i} returned C={C}, but expected out_channels[{i}]={expected_c}. "
+                                "Update embed_dim/out_channels or inspect BasicLayer/patch_merging.")
+
             x = self.norm_layers[i](x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
             features.append(x)
 
