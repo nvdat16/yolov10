@@ -526,31 +526,6 @@ class PatchEmbed(nn.Module):
 
 
 class SwinTransformerV2(nn.Module):
-    r""" Swin Transformer
-        A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
-          https://arxiv.org/pdf/2103.14030
-
-    Args:
-        img_size (int | tuple(int)): Input image size. Default 224
-        patch_size (int | tuple(int)): Patch size. Default: 4
-        in_chans (int): Number of input image channels. Default: 3
-        num_classes (int): Number of classes for classification head. Default: 1000
-        embed_dim (int): Patch embedding dimension. Default: 96
-        depths (tuple(int)): Depth of each Swin Transformer layer.
-        num_heads (tuple(int)): Number of attention heads in different layers.
-        window_size (int): Window size. Default: 7
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
-        qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
-        drop_rate (float): Dropout rate. Default: 0
-        attn_drop_rate (float): Attention dropout rate. Default: 0
-        drop_path_rate (float): Stochastic depth rate. Default: 0.1
-        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
-        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
-        patch_norm (bool): If True, add normalization after patch embedding. Default: True
-        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
-        pretrained_window_sizes (tuple(int)): Pretrained window sizes of each layer.
-    """
-
     def __init__(self, img_size=256, patch_size=4, in_chans=3, num_classes=1000,
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=8, mlp_ratio=4., qkv_bias=True,
@@ -559,94 +534,130 @@ class SwinTransformerV2(nn.Module):
                  use_checkpoint=False, pretrained_window_sizes=[0, 0, 0, 0], **kwargs):
         super().__init__()
 
-        self.num_classes = num_classes
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
-        self.patch_norm = patch_norm
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
-        self.mlp_ratio = mlp_ratio
 
-        # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
-        num_patches = self.patch_embed.num_patches
+            norm_layer=norm_layer if patch_norm else None)
         patches_resolution = self.patch_embed.patches_resolution
-        self.patches_resolution = patches_resolution
+        num_patches = self.patch_embed.num_patches
 
-        # absolute position embedding
         if self.ape:
             self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
             trunc_normal_(self.absolute_pos_embed, std=.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
 
-        # stochastic depth
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+        # === Stage 1 ===
+        C = embed_dim
+        self.stage1 = nn.ModuleList([
+            SwinTransformerBlock(dim=C, input_resolution=patches_resolution,
+                                 num_heads=num_heads[0],
+                                 window_size=window_size,
+                                 shift_size=0 if i % 2 == 0 else window_size // 2,
+                                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                                 drop=drop_rate, attn_drop=attn_drop_rate,
+                                 drop_path=dpr[sum(depths[:0]) + i],
+                                 norm_layer=norm_layer)
+            for i in range(depths[0])
+        ])
+        self.down1 = PatchMerging(patches_resolution, C, norm_layer)
 
-        # build layers
-        self.layers = nn.ModuleList()
-        for i_layer in range(self.num_layers):
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
-                               input_resolution=(patches_resolution[0] // (2 ** (i_layer-1)),
-                                                 patches_resolution[1] // (2 ** (i_layer-1))) 
-                                                 if i_layer > 0 else patches_resolution,
-                               depth=depths[i_layer],
-                               num_heads=num_heads[i_layer],
-                               window_size=window_size,
-                               mlp_ratio=self.mlp_ratio,
-                               qkv_bias=qkv_bias,
-                               drop=drop_rate, attn_drop=attn_drop_rate,
-                               drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                               norm_layer=norm_layer,
-                               downsample=PatchMerging if (i_layer != 0) else None,
-                               use_checkpoint=use_checkpoint,
-                               pretrained_window_size=pretrained_window_sizes[i_layer])
-            self.layers.append(layer)
+        # === Stage 2 ===
+        C2 = C * 2
+        res2 = (patches_resolution[0] // 2, patches_resolution[1] // 2)
+        self.stage2 = nn.ModuleList([
+            SwinTransformerBlock(dim=C2, input_resolution=res2,
+                                 num_heads=num_heads[1],
+                                 window_size=window_size,
+                                 shift_size=0 if i % 2 == 0 else window_size // 2,
+                                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                                 drop=drop_rate, attn_drop=attn_drop_rate,
+                                 drop_path=dpr[sum(depths[:1]) + i],
+                                 norm_layer=norm_layer)
+            for i in range(depths[1])
+        ])
+        self.down2 = PatchMerging(res2, C2, norm_layer)
 
-        self.out_channels = [embed_dim, embed_dim * 2, embed_dim * 4, embed_dim * 8]
+        # === Stage 3 ===
+        C3 = C2 * 2
+        res3 = (patches_resolution[0] // 4, patches_resolution[1] // 4)
+        self.stage3 = nn.ModuleList([
+            SwinTransformerBlock(dim=C3, input_resolution=res3,
+                                 num_heads=num_heads[2],
+                                 window_size=window_size,
+                                 shift_size=0 if i % 2 == 0 else window_size // 2,
+                                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                                 drop=drop_rate, attn_drop=attn_drop_rate,
+                                 drop_path=dpr[sum(depths[:2]) + i],
+                                 norm_layer=norm_layer)
+            for i in range(depths[2])
+        ])
+        self.down3 = PatchMerging(res3, C3, norm_layer)
 
-        self.apply(self._init_weights)
-        for bly in self.layers:
-            bly._init_respostnorm()
+        # === Stage 4 ===
+        C4 = C3 * 2
+        res4 = (patches_resolution[0] // 8, patches_resolution[1] // 8)
+        self.stage4 = nn.ModuleList([
+            SwinTransformerBlock(dim=C4, input_resolution=res4,
+                                 num_heads=num_heads[3],
+                                 window_size=window_size,
+                                 shift_size=0 if i % 2 == 0 else window_size // 2,
+                                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                                 drop=drop_rate, attn_drop=attn_drop_rate,
+                                 drop_path=dpr[sum(depths[:3]) + i],
+                                 norm_layer=norm_layer)
+            for i in range(depths[3])
+        ])
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+        # Lateral layers (đầu ra cho YOLO)
+        self.lateral = nn.ModuleList([
+            nn.Conv2d(C2, C2, 1),
+            nn.Conv2d(C3, C3, 1),
+            nn.Conv2d(C4, C4, 1)
+        ])
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'absolute_pos_embed'}
-
-    @torch.jit.ignore
-    def no_weight_decay_keywords(self):
-        return {"cpb_mlp", "logit_scale", 'relative_position_bias_table'}
-
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
-        features = []
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
-            print(f"stage{i}:", x.shape)
-            features.append(x)
+        # Stage 1
+        for blk in self.stage1:
+            x = blk(x)
+        x2 = self.down1(x)
 
-        return features[1:]
+        # Stage 2
+        for blk in self.stage2:
+            x2 = blk(x2)
+        x3 = self.down2(x2)
 
-    def flops(self):
-        flops = 0
-        flops += self.patch_embed.flops()
-        for layer in self.layers:
-            flops += layer.flops()
-        flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2 ** self.num_layers)
-        flops += self.num_features * self.num_classes
-        return flops
+        # Stage 3
+        for blk in self.stage3:
+            x3 = blk(x3)
+        x4 = self.down3(x3)
+
+        # Stage 4
+        for blk in self.stage4:
+            x4 = blk(x4)
+
+        # Convert thành map 2D cho YOLO
+        B = x2.shape[0]
+        H2 = W2 = int(x2.shape[1] ** 0.5)
+        H3 = W3 = int(x3.shape[1] ** 0.5)
+        H4 = W4 = int(x4.shape[1] ** 0.5)
+
+        x2 = x2.transpose(1, 2).view(B, -1, H2, W2)
+        x3 = x3.transpose(1, 2).view(B, -1, H3, W3)
+        x4 = x4.transpose(1, 2).view(B, -1, H4, W4)
+
+        p3 = self.lateral[0](x2)
+        p4 = self.lateral[1](x3)
+        p5 = self.lateral[2](x4)
+
+        return [p3, p4, p5]
