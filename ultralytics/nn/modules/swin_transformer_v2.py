@@ -448,13 +448,13 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        if self.downsample is not None:
+            x = self.downsample(x)
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
                 x = blk(x)
-        if self.downsample is not None:
-            x = self.downsample(x)
         return x
 
     def extra_repr(self) -> str:
@@ -598,7 +598,7 @@ class SwinTransformerV2(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                               downsample=PatchMerging if (i_layer != 0) else None,
                                use_checkpoint=use_checkpoint,
                                pretrained_window_size=pretrained_window_sizes[i_layer])
             self.layers.append(layer)
@@ -638,7 +638,7 @@ class SwinTransformerV2(nn.Module):
             print(f"stage{i}:", x.shape)
             features.append(x)
 
-        return features[0:2]
+        return features[1:]
 
     def flops(self):
         flops = 0
