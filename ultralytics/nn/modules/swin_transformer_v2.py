@@ -638,7 +638,7 @@ class SwinTransformerV2(nn.Module):
             print(f"stage{i}:", x.shape)
             features.append(x)
 
-        return features[1:]
+        return features[0:2]
 
     def flops(self):
         flops = 0
