@@ -621,6 +621,8 @@ class SwinTransformerV2(nn.Module):
             nn.Conv2d(C4, C4, 1)
         ])
 
+        self.out_channels = [C2, C3, C4]
+
     def forward(self, x):
         x = self.patch_embed(x)
         if self.ape:
