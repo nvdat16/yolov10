@@ -637,12 +637,12 @@ class SwinTransformerV2(nn.Module):
             x = layer(x)
             features.append(x)
 
-        return features
+        return features[1:]
 
     def flops(self):
         flops = 0
         flops += self.patch_embed.flops()
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             flops += layer.flops()
         flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2 ** self.num_layers)
         flops += self.num_features * self.num_classes
