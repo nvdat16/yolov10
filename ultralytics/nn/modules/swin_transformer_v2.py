@@ -633,8 +633,9 @@ class SwinTransformerV2(nn.Module):
         x = self.pos_drop(x)
 
         features = []
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x)
+            print(f"stage{i}:", x.shape)
             features.append(x)
 
         return features[1:]
