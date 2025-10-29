@@ -371,7 +371,6 @@ class PatchMerging(nn.Module):
         """
         H, W = self.input_resolution
         B, L, C = x.shape
-        print(B, L, C, H, W)
         assert L == H * W, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
 
@@ -553,7 +552,7 @@ class SwinTransformerV2(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
 
-        # === Stage 1 ===
+        # Stage 1
         C = embed_dim
         self.stage1 = nn.ModuleList([
             SwinTransformerBlock(dim=C, input_resolution=patches_resolution,
@@ -568,7 +567,7 @@ class SwinTransformerV2(nn.Module):
         ])
         self.down1 = PatchMerging(patches_resolution, C, norm_layer)
 
-        # === Stage 2 ===
+        # Stage 2
         C2 = C * 2
         res2 = (patches_resolution[0] // 2, patches_resolution[1] // 2)
         self.stage2 = nn.ModuleList([
@@ -584,7 +583,7 @@ class SwinTransformerV2(nn.Module):
         ])
         self.down2 = PatchMerging(res2, C2, norm_layer)
 
-        # === Stage 3 ===
+        # Stage 3
         C3 = C2 * 2
         res3 = (patches_resolution[0] // 4, patches_resolution[1] // 4)
         self.stage3 = nn.ModuleList([
@@ -600,7 +599,7 @@ class SwinTransformerV2(nn.Module):
         ])
         self.down3 = PatchMerging(res3, C3, norm_layer)
 
-        # === Stage 4 ===
+        # Stage 4
         C4 = C3 * 2
         res4 = (patches_resolution[0] // 8, patches_resolution[1] // 8)
         self.stage4 = nn.ModuleList([
