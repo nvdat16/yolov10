@@ -580,10 +580,13 @@ class SwinTransformerV2(nn.Module):
             self.layers.append(layer)
 
         self.norm_layers = nn.ModuleList([
-            norm_layer(int(embed_dim * 2 ** i)) for i in range(self.num_layers)
+            nn.LayerNorm(embed_dim),
+            nn.LayerNorm(embed_dim * 2),
+            nn.LayerNorm(embed_dim * 4),
+            nn.LayerNorm(embed_dim * 8),
         ])
 
-        self.out_channels = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
+        self.out_channels = [embed_dim, embed_dim * 2, embed_dim * 4, embed_dim * 8]
 
         self.apply(self._init_weights)
         for bly in self.layers:
