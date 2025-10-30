@@ -290,6 +290,9 @@ class SwinTransformerBlock(nn.Module):
         if pad_b > 0 or pad_r > 0:
             x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
             H, W = x.shape[1:3]
+            attn_mask = None
+        else:
+            attn_mask = self.attn_mask
 
         # cyclic shift
         if self.shift_size > 0:
@@ -302,7 +305,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        attn_windows = self.attn(x_windows, mask=attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
