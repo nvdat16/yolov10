@@ -274,15 +274,6 @@ class SwinTransformerBlock(nn.Module):
         
         # Mã mới để xử lý lỗi sai kích thước phổ biến khi tracing/tính toán stride
         if L != H * W:
-             # Cố gắng suy ra H và W từ L. 
-             # Giả định đơn giản nhất là tensor là hình vuông cho mục đích tracing,
-             # hoặc sử dụng H và W đã khởi tạo để kiểm tra, sau đó recalculate.
-             # Trong trường hợp của Swin Transformer, L thường là một số chẵn.
-             
-             # Cách làm phổ biến trong các framework: thử tính H và W từ L
-             # Trong trường hợp BasicLayer.forward, độ phân giải mới có thể được suy ra từ L.
-             
-             # Cố gắng tính H và W từ L, ưu tiên dùng H/W đã được khởi tạo:
              if H > 0 and W > 0 and L % H == 0:
                  W = L // H
              elif H > 0 and W > 0 and L % W == 0:
@@ -369,8 +360,8 @@ class PatchMerging(nn.Module):
         """
         x: B, H*W, C
         """
-        H, W = self.input_resolution
         B, L, C = x.shape
+        H = W = int(L ** 0.5)
         assert L == H * W, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
 
