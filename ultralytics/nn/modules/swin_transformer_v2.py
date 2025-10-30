@@ -271,25 +271,25 @@ class SwinTransformerBlock(nn.Module):
     def forward(self, x):
         H, W = self.input_resolution
         B, L, C = x.shape
-        
-        # Mã mới để xử lý lỗi sai kích thước phổ biến khi tracing/tính toán stride
+
+        # Auto infer size nếu mismatch
         if L != H * W:
-             if H > 0 and W > 0 and L % H == 0:
-                 W = L // H
-             elif H > 0 and W > 0 and L % W == 0:
-                 H = L // W
-             else:
-                 # Nếu không suy ra được một cách hợp lý, hãy thử căn bậc hai (giả định hình vuông)
-                 _H = int(L**0.5)
-                 _W = L // _H
-                 if _H * _W == L:
-                    H, W = _H, _W
-                 else:
-                     # Nếu không thể suy luận, giữ nguyên lỗi ban đầu để tránh sai sót nghiêm trọng
-                     assert L == H * W, f"input feature has wrong size ({L}) and cannot be inferred from resolution ({H}x{W})"
-        
+            _H = int(L ** 0.5)
+            _W = L // _H
+            if _H * _W == L:
+                H, W = _H, _W
+            else:
+                raise ValueError(f"Cannot infer spatial size from L={L}")
+
         shortcut = x
         x = x.view(B, H, W, C)
+
+        # Auto pad để chia hết window_size
+        pad_b = (self.window_size - H % self.window_size) % self.window_size
+        pad_r = (self.window_size - W % self.window_size) % self.window_size
+        if pad_b > 0 or pad_r > 0:
+            x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
+            H, W = x.shape[1:3]
 
         # cyclic shift
         if self.shift_size > 0:
@@ -298,27 +298,29 @@ class SwinTransformerBlock(nn.Module):
             shifted_x = x
 
         # partition windows
-        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+        x_windows = window_partition(shifted_x, self.window_size)
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)
+
+        # remove padding if added
+        if pad_b > 0 or pad_r > 0:
+            shifted_x = shifted_x[:, :self.input_resolution[0], :self.input_resolution[1], :]
 
         # reverse cyclic shift
         if self.shift_size > 0:
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        x = x.view(B, H * W, C)
+
+        x = x.view(B, -1, C)
         x = shortcut + self.drop_path(self.norm1(x))
-
-        # FFN
         x = x + self.drop_path(self.norm2(self.mlp(x)))
-
         return x
 
     def extra_repr(self) -> str:
