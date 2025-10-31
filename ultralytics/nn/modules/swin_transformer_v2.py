@@ -272,8 +272,28 @@ class SwinTransformerBlock(nn.Module):
         H, W = self.input_resolution
         B, L, C = x.shape
 
+        # Auto infer size nếu mismatch
+        if L != H * W:
+            _H = int(L ** 0.5)
+            _W = L // _H
+            if _H * _W == L:
+                H, W = _H, _W
+            else:
+                raise ValueError(f"Cannot infer spatial size from L={L}")
+
         shortcut = x
         x = x.view(B, H, W, C)
+
+        pad_b = (self.window_size - H % self.window_size) % self.window_size
+        pad_r = (self.window_size - W % self.window_size) % self.window_size
+        if pad_b > 0 or pad_r > 0:
+            x = x.permute(0, 3, 1, 2)  # B,C,H,W
+            x = F.pad(x, (0, pad_r, 0, pad_b))  # pad width & height
+            x = x.permute(0, 2, 3, 1).contiguous()  # B,H,W,C
+            H, W = x.shape[1:3]
+            attn_mask = None  # disable old mask
+        else:
+            attn_mask = self.attn_mask
 
         # cyclic shift
         if self.shift_size > 0:
@@ -286,7 +306,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        attn_windows = self.attn(x_windows, mask=attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -297,12 +317,13 @@ class SwinTransformerBlock(nn.Module):
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        x = x.view(B, H * W, C)
+
+        if pad_b > 0 or pad_r > 0:
+            x = x[:, :H - pad_b, :W - pad_r, :].contiguous()
+
+        x = x.view(B, -1, C)
         x = shortcut + self.drop_path(self.norm1(x))
-
-        # FFN
         x = x + self.drop_path(self.norm2(self.mlp(x)))
-
         return x
 
     def extra_repr(self) -> str:
