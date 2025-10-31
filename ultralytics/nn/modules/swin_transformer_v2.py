@@ -272,27 +272,8 @@ class SwinTransformerBlock(nn.Module):
         H, W = self.input_resolution
         B, L, C = x.shape
 
-        # Auto infer size nếu mismatch
-        if L != H * W:
-            _H = int(L ** 0.5)
-            _W = L // _H
-            if _H * _W == L:
-                H, W = _H, _W
-            else:
-                raise ValueError(f"Cannot infer spatial size from L={L}")
-
         shortcut = x
         x = x.view(B, H, W, C)
-
-        # Auto pad để chia hết window_size
-        pad_b = (self.window_size - H % self.window_size) % self.window_size
-        pad_r = (self.window_size - W % self.window_size) % self.window_size
-        if pad_b > 0 or pad_r > 0:
-            x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
-            H, W = x.shape[1:3]
-            attn_mask = None
-        else:
-            attn_mask = self.attn_mask
 
         # cyclic shift
         if self.shift_size > 0:
@@ -305,25 +286,23 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)
-
-        # remove padding if added
-        if pad_b > 0 or pad_r > 0:
-            shifted_x = shifted_x[:, :self.input_resolution[0], :self.input_resolution[1], :]
 
         # reverse cyclic shift
         if self.shift_size > 0:
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-
-        x = x.view(B, -1, C)
+        x = x.view(B, H * W, C)
         x = shortcut + self.drop_path(self.norm1(x))
+
+        # FFN
         x = x + self.drop_path(self.norm2(self.mlp(x)))
+
         return x
 
     def extra_repr(self) -> str:
