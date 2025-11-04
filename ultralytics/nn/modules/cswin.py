@@ -317,6 +317,7 @@ class CSWinTransformer(nn.Module):
     def forward(self, x):
         # Stage 1
         x = self.stage1_conv_embed(x)
+        print('stage1 tokens:', x.shape)  # (B, H1*W1, C)
         for blk in self.stage1:
             if self.use_chk:
                 x = checkpoint.checkpoint(blk, x)
