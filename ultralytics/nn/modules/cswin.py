@@ -97,8 +97,8 @@ class LePEAttention(nn.Module):
         q,k,v = qkv[0], qkv[1], qkv[2]
 
         ### Img2Window
-        H = W = self.resolution
         B, L, C = q.shape
+        H = W = int(L**0.5)
         assert L == H * W, "flatten img_tokens has wrong size"
         
         q = self.im2cswin(q)
@@ -122,7 +122,7 @@ class LePEAttention(nn.Module):
 class CSWinBlock(nn.Module):
 
     def __init__(self, dim, reso, num_heads,
-                 split_size=7, mlp_ratio=4., qkv_bias=False, qk_scale=None,
+                 split_size=8, mlp_ratio=4., qkv_bias=False, qk_scale=None,
                  drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  last_stage=False):
@@ -317,7 +317,6 @@ class CSWinTransformer(nn.Module):
     def forward(self, x):
         # Stage 1
         x = self.stage1_conv_embed(x)
-        print('stage1 tokens:', x.shape)  # (B, H1*W1, C)
         for blk in self.stage1:
             if self.use_chk:
                 x = checkpoint.checkpoint(blk, x)
