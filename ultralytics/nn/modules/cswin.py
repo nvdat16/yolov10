@@ -41,7 +41,7 @@ class Mlp(nn.Module):
         return x
 
 class LePEAttention(nn.Module):
-    def __init__(self, dim, resolution, idx, split_size=7, dim_out=None, num_heads=8, attn_drop=0., proj_drop=0., qk_scale=None):
+    def __init__(self, dim, resolution, idx, split_size=8, dim_out=None, num_heads=8, attn_drop=0., proj_drop=0., qk_scale=None):
         super().__init__()
         self.dim = dim
         self.dim_out = dim_out or dim
@@ -228,7 +228,7 @@ class Merge_Block(nn.Module):
 class CSWinTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
-    def __init__(self, img_size=256, patch_size=4, in_chans=3, num_classes=1000, embed_dim=64, depth=[2,2,6,2], split_size = [1,2,7,7],
+    def __init__(self, img_size=256, patch_size=4, in_chans=3, num_classes=1000, embed_dim=64, depth=[2,2,6,2], split_size = [1,2,8,8],
                  num_heads=[2,4,8,16], mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, use_chk=False):
         super().__init__()
