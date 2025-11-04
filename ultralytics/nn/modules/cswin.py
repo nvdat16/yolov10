@@ -361,6 +361,10 @@ class CSWinTransformer(nn.Module):
         feat3 = self.norm3(feat3)
         feat4 = self.norm4(feat4)
 
+        feat2 = feat2.transpose(1, 2).contiguous().view(B, -1, H2, W2)
+        feat3 = feat3.transpose(1, 2).contiguous().view(B, -1, H3, W3)
+        feat4 = feat4.transpose(1, 2).contiguous().view(B, -1, H4, W4)
+
         p3 = self.lateral[0](feat2)
         p4 = self.lateral[1](feat3)
         p5 = self.lateral[2](feat4)
