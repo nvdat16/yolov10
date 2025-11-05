@@ -80,7 +80,7 @@ from .transformer import (
     TransformerLayer,
 )
 from .cswin import CSWinStem, CSWinStage, CSWinDownsample, Reshape
-from .swin_transformer_v2 import SwinTransformerV2
+from .swin_transformer_v2 import SwinTransformerV2, Stage
 from .swinv2 import SWinStem, SWinStage, SWinDownsample
 
 __all__ = (
@@ -155,4 +155,5 @@ __all__ = (
     "CSWinStage",
     "CSWinDownsample",
     "Reshape",
+    "Stage",
 )

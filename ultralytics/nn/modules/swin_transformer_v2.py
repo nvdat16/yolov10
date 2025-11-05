@@ -664,3 +664,10 @@ class SwinTransformerV2(nn.Module):
         p5 = self.lateral[2](x4)
 
         return [p3, p4, p5]
+
+class Stage(nn.Module):
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+    def forward(self, x):
+        return x[self.index]
