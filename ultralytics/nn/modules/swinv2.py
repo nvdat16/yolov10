@@ -395,7 +395,7 @@ class SWinStage(nn.Module):
             if self.use_checkpoint and self.training:
                 x = checkpoint.checkpoint(blk, x, (H, W), use_reentrant=False)
             else:
-                x = blk(x, (H, W))
+                x = blk(x, input_resolution=(H, W))
         x = self.norm(x)
         return x, (H, W)
 
@@ -403,7 +403,7 @@ class SWinStage(nn.Module):
 class SWinStem(nn.Module):
     def __init__(self, in_chans=3, embed_dim=96):
         super().__init__()
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=7, stride=4, padding=3)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=4, stride=4)
         self.rearrange = Rearrange('b c h w -> b (h w) c')
         self.norm = nn.LayerNorm(embed_dim)
 
