@@ -54,12 +54,13 @@ from ultralytics.nn.modules import (
     SCDown,
     RepVGGDW,
     v10Detect,
-    CSWinTransformer,
-    Stage,
     SwinTransformerV2,
     SWinStem,
     SWinStage,
     SWinDownsample,
+    CSWinStem,
+    CSWinStage,
+    CSWinDownsample,
     Reshape
 )
 
@@ -935,6 +936,35 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = c1_tuple # Đầu ra vẫn là tuple, chỉ có tensor thay đổi, dim và (H,W) giữ nguyên
 
         elif m is SWinDownsample:
+            if isinstance(current_ch_in, tuple):
+                c1_dim = current_ch_in[0]
+            else: # Nếu đầu vào từ lớp Conv thường
+                c1_dim = current_ch_in
+            c2_dim = args[1] # Lấy dim_out
+            if c2_dim != nc:
+                c2_dim = make_divisible(min(c2_dim, max_channels) * width, 8)
+            args = [c1_dim, c2_dim]
+            c2 = (c2_dim, (0, 0)) # Đầu ra là tuple mới với dim và (H, W) đã thay đổi
+        # Kết thúc các khối logic cho SWin
+
+        # Bắt đầu các khối logic cho CSWin
+        elif m is CSWinStem:
+            c1 = current_ch_in
+            c2_dim = args[1] # Lấy embed_dim
+            args = [c1, c2_dim]
+            c2 = (c2_dim, (0, 0)) # Đầu ra là một tuple (dim, (H, W))
+
+        elif m is CSWinStage:
+            if isinstance(current_ch_in, tuple):
+                c1_tuple = current_ch_in
+                c1_dim = c1_tuple[0]
+            else: # Nếu đầu vào từ lớp Conv thường
+                c1_tuple = (current_ch_in, (0, 0))
+                c1_dim = current_ch_in
+            args.insert(0, c1_dim) # Thêm dim vào đầu args
+            c2 = c1_tuple # Đầu ra vẫn là tuple, chỉ có tensor thay đổi, dim và (H,W) giữ nguyên
+
+        elif m is CSWinDownsample:
             if isinstance(current_ch_in, tuple):
                 c1_dim = current_ch_in[0]
             else: # Nếu đầu vào từ lớp Conv thường
