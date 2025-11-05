@@ -57,6 +57,10 @@ from ultralytics.nn.modules import (
     CSWinTransformer,
     Stage,
     SwinTransformerV2,
+    SWinStem,
+    SWinStage,
+    SWinDownsample,
+    Reshape
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -864,6 +868,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+
+        # Lấy kênh đầu vào (có thể là int hoặc tuple)
+        current_ch_in = ch[f] if isinstance(f, int) else [ch[x] for x in f]
+
         if m in {
             Classify,
             Conv,
@@ -894,7 +902,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB
         }:
-            c1, c2 = ch[f], args[0]
+            c1 = current_ch_in[0] if isinstance(current_ch_in, tuple) else current_ch_in
+            c2 = args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             if m is C2fAttn:
@@ -907,6 +916,40 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m in (BottleneckCSP, C1, C2, C2f, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, C2fCIB):
                 args.insert(2, n)  # number of repeats
                 n = 1
+
+        # Bắt đầu các khối logic cho SWin
+        elif m is SWinStem:
+            c1 = current_ch_in
+            c2_dim = args[1] # Lấy embed_dim
+            args = [c1, c2_dim]
+            c2 = (c2_dim, (0, 0)) # Đầu ra là một tuple (dim, (H, W))
+
+        elif m is SWinStage:
+            if isinstance(current_ch_in, tuple):
+                c1_tuple = current_ch_in
+                c1_dim = c1_tuple[0]
+            else: # Nếu đầu vào từ lớp Conv thường
+                c1_tuple = (current_ch_in, (0, 0))
+                c1_dim = current_ch_in
+            args.insert(0, c1_dim) # Thêm dim vào đầu args
+            c2 = c1_tuple # Đầu ra vẫn là tuple, chỉ có tensor thay đổi, dim và (H,W) giữ nguyên
+
+        elif m is SWinDownsample:
+            if isinstance(current_ch_in, tuple):
+                c1_dim = current_ch_in[0]
+            else: # Nếu đầu vào từ lớp Conv thường
+                c1_dim = current_ch_in
+            c2_dim = args[1] # Lấy dim_out
+            if c2_dim != nc:
+                c2_dim = make_divisible(min(c2_dim, max_channels) * width, 8)
+            args = [c1_dim, c2_dim]
+            c2 = (c2_dim, (0, 0)) # Đầu ra là tuple mới với dim và (H, W) đã thay đổi
+
+        elif m is Reshape:
+            c1_tuple = current_ch_in
+            c2 = c1_tuple[0] # Chuyển từ tuple về lại kênh (int)
+        # Kết thúc các khối logic cho CSWin
+
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:

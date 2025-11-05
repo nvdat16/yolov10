@@ -81,6 +81,7 @@ from .transformer import (
 )
 from .cswin import CSWinTransformer, Stage
 from .swin_transformer_v2 import SwinTransformerV2
+from .swinv2 import SWinStem, SWinStage, SWinDownsample, Reshape
 
 __all__ = (
     "Conv",
@@ -148,5 +149,9 @@ __all__ = (
     "v10Detect",
     "CSWinTransformer",
     "Stage",
-    "SwinTransformerV2"
+    "SwinTransformerV2",
+    "SWinStem",
+    "SWinStage",
+    "SWinDownsample",
+    "Reshape",
 )
