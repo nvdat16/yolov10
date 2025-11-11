@@ -624,30 +624,25 @@ class SwinTransformerV2(nn.Module):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-        print(x.shape)
 
         # Stage 1
         for blk in self.stage1:
             x = blk(x)
         x2 = self.down1(x)
-        print(x2.shape)
 
         # Stage 2
         for blk in self.stage2:
             x2 = blk(x2)
         x3 = self.down2(x2)
-        print(x3.shape)
 
         # Stage 3
         for blk in self.stage3:
             x3 = blk(x3)
         x4 = self.down3(x3)
-        print(x4.shape)
 
         # Stage 4
         for blk in self.stage4:
             x4 = blk(x4)
-        print(x4.shape)
 
         # Convert thành map 2D cho YOLO
         B = x2.shape[0]
