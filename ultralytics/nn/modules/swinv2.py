@@ -370,7 +370,7 @@ class SWinStage(nn.Module):
 
         # build blocks
         self.blocks = nn.ModuleList([
-            SwinTransformerBlock(dim=dim, input_resolution=(0, 0),
+            SwinTransformerBlock(dim=dim, input_resolution=(None, None),
                                  num_heads=num_heads, window_size=self.window_size,
                                  shift_size=0 if (i % 2 == 0) else self.window_size // 2,
                                  mlp_ratio=mlp_ratio,
