@@ -292,7 +292,16 @@ class SwinTransformerBlock(nn.Module):
         H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
-
+        
+        # Auto infer size nếu mismatch
+        if L != H * W:
+            _H = int(L ** 0.5)
+            _W = L // _H
+            if _H * _W == L:
+                H, W = _H, _W
+            else:
+                raise ValueError(f"Cannot infer spatial size from L={L}")
+            
         # update stored input_resolution if desired
         self.input_resolution = (H, W)
 
