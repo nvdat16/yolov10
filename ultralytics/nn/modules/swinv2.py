@@ -395,7 +395,7 @@ class SWinStage(nn.Module):
             if self.use_checkpoint and self.training:
                 x = checkpoint.checkpoint(blk, x, (H, W), use_reentrant=False)
             else:
-                x = blk(x, input_resolution=(H, W))
+                x = blk(x, (H, W))
         x = self.norm(x)
         return x, (H, W)
 
