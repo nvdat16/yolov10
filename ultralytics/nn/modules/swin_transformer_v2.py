@@ -48,7 +48,7 @@ def window_partition(x, window_size):
     pad_w = (window_size - W % window_size) % window_size
 
     if pad_h != 0 or pad_w != 0:
-        # pad expects (left, right, top, bottom) in NCHW, so convert and pad then convert back
+        # pad expects (left, right, top, bottom) in NCHW
         x = x.permute(0, 3, 1, 2)            # B, C, H, W
         x = F.pad(x, (0, pad_w, 0, pad_h))   # pad width then height
         x = x.permute(0, 2, 3, 1)            # B, H_new, W_new, C
@@ -73,7 +73,6 @@ def window_reverse(windows, window_size, H, W, pad_h=0, pad_w=0):
     Returns:
         x: (B, H, W, C)  # cropped to original H, W
     """
-    # compute padded sizes
     H_padded = H + pad_h
     W_padded = W + pad_w
     nW = (H_padded // window_size) * (W_padded // window_size)
@@ -289,18 +288,13 @@ class SwinTransformerBlock(nn.Module):
 
         self.register_buffer("attn_mask", attn_mask)
 
-    def forward(self, x):
-        H, W = self.input_resolution
+    def forward(self, x, input_resolution):
+        H, W = input_resolution
         B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
 
-        # Auto infer size nếu mismatch
-        if L != H * W:
-            _H = int(L ** 0.5)
-            _W = L // _H
-            if _H * _W == L:
-                H, W = _H, _W
-            else:
-                raise ValueError(f"Cannot infer spatial size from L={L}")
+        # update stored input_resolution if desired
+        self.input_resolution = (H, W)
 
         shortcut = x
         x = x.view(B, H, W, C)
@@ -311,12 +305,35 @@ class SwinTransformerBlock(nn.Module):
         else:
             shifted_x = x
 
-        # partition windows (with padding info)
-        x_windows, pad_h, pad_w = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+        # --- Build attn_mask dynamically for this (H, W) if shift used ---
+        if self.shift_size > 0:
+            # build image mask of shape (1, H, W, 1) on same device/dtype as x
+            img_mask = torch.zeros((1, H, W, 1), device=x.device, dtype=x.dtype)
+            h_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            w_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            cnt = 0
+            for h in h_slices:
+                for w in w_slices:
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            # use window_partition that returns pad info (windows, pad_h, pad_w)
+            mask_windows, pad_h_mask, pad_w_mask = window_partition(img_mask, self.window_size)  # nW, ws, ws, 1
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        else:
+            attn_mask = None
 
-        # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        # partition windows (with padding info)
+        x_windows, pad_h, pad_w = window_partition(shifted_x, self.window_size)  # nW*B, ws, ws, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, ws*ws, C
+
+        # W-MSA/SW-MSA (pass the mask built for current H,W)
+        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, ws*ws, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
