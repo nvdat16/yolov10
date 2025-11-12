@@ -359,7 +359,7 @@ class PatchMerging(nn.Module):
         return x, (H_new, W_new)
 
 class SWinStage(nn.Module):
-    def __init__(self, dim, depth, num_heads, use_checkpoint=False):
+    def __init__(self, dim, depth, num_heads, imgsz, use_checkpoint=False):
         super().__init__()
         mlp_ratio = 4.0
         qkv_bias = True
@@ -370,7 +370,7 @@ class SWinStage(nn.Module):
 
         # build blocks
         self.blocks = nn.ModuleList([
-            SwinTransformerBlock(dim=dim, input_resolution=(None, None),
+            SwinTransformerBlock(dim=dim, input_resolution=(imgsz, imgsz),
                                  num_heads=num_heads, window_size=self.window_size,
                                  shift_size=0 if (i % 2 == 0) else self.window_size // 2,
                                  mlp_ratio=mlp_ratio,
