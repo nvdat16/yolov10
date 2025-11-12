@@ -41,28 +41,49 @@ def window_partition(x, window_size):
 
     Returns:
         windows: (num_windows*B, window_size, window_size, C)
+        pad_h: int, padding added to height (bottom)
+        pad_w: int, padding added to width (right)
     """
     B, H, W, C = x.shape
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+
+    if pad_h != 0 or pad_w != 0:
+        # pad expects (left, right, top, bottom) in NCHW
+        x = x.permute(0, 3, 1, 2)            # B, C, H, W
+        x = F.pad(x, (0, pad_w, 0, pad_h))   # pad width then height
+        x = x.permute(0, 2, 3, 1)            # B, H_new, W_new, C
+        H = H + pad_h
+        W = W + pad_w
+
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    return windows
+    return windows, pad_h, pad_w
 
 
-def window_reverse(windows, window_size, H, W):
+def window_reverse(windows, window_size, H, W, pad_h=0, pad_w=0):
     """
     Args:
         windows: (num_windows*B, window_size, window_size, C)
         window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
+        H (int): original Height of image (before padding)
+        W (int): original Width of image (before padding)
+        pad_h (int): padding added to height (bottom)
+        pad_w (int): padding added to width (right)
 
     Returns:
-        x: (B, H, W, C)
+        x: (B, H, W, C)  # cropped to original H, W
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    H_padded = H + pad_h
+    W_padded = W + pad_w
+    nW = (H_padded // window_size) * (W_padded // window_size)
+    B = int(windows.shape[0] / nW)
+    x = windows.view(B, H_padded // window_size, W_padded // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H_padded, W_padded, -1)
+    if pad_h != 0 or pad_w != 0:
+        x = x[:, :H, :W, :].contiguous()
     return x
+
 
 
 class WindowAttention(nn.Module):
@@ -259,7 +280,7 @@ class SwinTransformerBlock(nn.Module):
                     img_mask[:, h, w, :] = cnt
                     cnt += 1
 
-            mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
+            mask_windows, pad_h_mask, pad_w_mask = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
             mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
             attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
             attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
@@ -282,8 +303,8 @@ class SwinTransformerBlock(nn.Module):
         else:
             shifted_x = x
 
-        # partition windows
-        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
+        # partition windows (with padding info)
+        x_windows, pad_h, pad_w = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
@@ -291,7 +312,7 @@ class SwinTransformerBlock(nn.Module):
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W, pad_h, pad_w)  # B H W C (cropped)
 
         # reverse cyclic shift
         if self.shift_size > 0:
