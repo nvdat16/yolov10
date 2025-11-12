@@ -2,20 +2,20 @@ nc: 3
 
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, CSWinStem, [3, 96]] # 0
-  - [-1, 1, CSWinStage, [2, 3]] # 1
+  - [-1, 1, SWinStem, [3, 96]] # 0
+  - [-1, 1, SWinStage, [2, 3]] # 1
   - [-1, 1, Reshape, []] # 2
 
-  - [-1, 1, CSWinDownsample, [96, 192]] # 3
-  - [-1, 1, CSWinStage, [2, 6]] # 4
+  - [-1, 1, SWinDownsample, [96, 192]] # 3
+  - [-1, 1, SWinStage, [2, 6]] # 4
   - [-1, 1, Reshape, []] # 5
 
-  - [-1, 1, CSWinDownsample, [192, 384]] # 6
-  - [-1, 1, CSWinStage, [6, 12]] # 7
+  - [-1, 1, SWinDownsample, [192, 384]] # 6
+  - [-1, 1, SWinStage, [6, 12]] # 7
   - [-1, 1, Reshape, []] # 8
 
-  - [-1, 1, CSWinDownsample, [384, 768]] # 9
-  - [-1, 1, CSWinStage, [2, 24]] # 10
+  - [-1, 1, SWinDownsample, [384, 768]] # 9
+  - [-1, 1, SWinStage, [2, 24]] # 10
   - [-1, 1, Reshape, []] # 11
 
 head:
