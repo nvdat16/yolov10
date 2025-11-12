@@ -294,6 +294,9 @@ class SwinTransformerBlock(nn.Module):
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
+        # update stored input_resolution if desired
+        self.input_resolution = (H, W)
+
         shortcut = x
         x = x.view(B, H, W, C)
 
@@ -303,12 +306,35 @@ class SwinTransformerBlock(nn.Module):
         else:
             shifted_x = x
 
-        # partition windows (with padding info)
-        x_windows, pad_h, pad_w = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+        # --- Build attn_mask dynamically for this (H, W) if shift used ---
+        if self.shift_size > 0:
+            # build image mask of shape (1, H, W, 1) on same device/dtype as x
+            img_mask = torch.zeros((1, H, W, 1), device=x.device, dtype=x.dtype)
+            h_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            w_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            cnt = 0
+            for h in h_slices:
+                for w in w_slices:
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            # use window_partition that returns pad info (windows, pad_h, pad_w)
+            mask_windows, pad_h_mask, pad_w_mask = window_partition(img_mask, self.window_size)  # nW, ws, ws, 1
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        else:
+            attn_mask = None
 
-        # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        # partition windows (with padding info)
+        x_windows, pad_h, pad_w = window_partition(shifted_x, self.window_size)  # nW*B, ws, ws, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, ws*ws, C
+
+        # W-MSA/SW-MSA (pass the mask built for current H,W)
+        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, ws*ws, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -326,6 +352,7 @@ class SwinTransformerBlock(nn.Module):
         x = x + self.drop_path(self.norm2(self.mlp(x)))
 
         return x
+
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
