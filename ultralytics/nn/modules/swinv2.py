@@ -412,7 +412,7 @@ class SWinStage(nn.Module):
         mlp_ratio = 4.0
         qkv_bias = True
         self.use_checkpoint = use_checkpoint
-        self.window_size = 8
+        self.window_size = 10
         norm_layer = nn.LayerNorm
         drop, attn_drop, drop_path = 0.0, 0.0, 0.2
 
