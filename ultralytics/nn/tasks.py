@@ -315,11 +315,13 @@ class DetectionModel(BaseModel):
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
             if isinstance(m, v10Detect):
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.to(device)
                 forward = lambda x: self.forward(x)["one2many"]
             # m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             device = next(self.parameters()).device
             dummy = torch.zeros(1, ch, s, s, device=device)
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(dummy)]) # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(dummy)], device=device) # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
