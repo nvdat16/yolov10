@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 
-import MultiScaleDeformableAttention as MSDA
+from ultralytics.nn import MultiScaleDeformableAttention as MSDA
 
 
 class RMSNorm(nn.Module):
