@@ -62,7 +62,9 @@ from ultralytics.nn.modules import (
     CSWinStage,
     CSWinDownsample,
     Reshape,
-    Stage
+    Stage,
+    DMSAMaxViT,
+    Deformable
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -980,6 +982,23 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1_tuple = current_ch_in
             c2 = c1_tuple[0] # Chuyển từ tuple về lại kênh (int)
         # Kết thúc các khối logic cho CSWin
+        elif m is Deformable:
+            c1 = ch[f]
+            c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            depth_ = args[1]
+            num_heads = args[2]
+            args = [c2, depth_, num_heads]
+            
+        elif m is DMSAMaxViT:
+            c1 = ch[f]
+            c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            depth_ = args[1]
+            num_heads = args[2]
+            args = [c2, depth_, num_heads]
 
         elif m is AIFI:
             args = [ch[f], *args]
@@ -1024,6 +1043,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = ch[f][idx]
             else:
                 c2 = ch[f]
+        # elif m is DMSAMaxViT:
+
         else:
             c2 = ch[f]
 
