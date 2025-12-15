@@ -82,6 +82,8 @@ from .transformer import (
 from .cswin import CSWinStem, CSWinStage, CSWinDownsample, Reshape
 from .swin_transformer_v2 import SwinTransformerV2, Stage
 from .swinv2 import SWinStem, SWinStage, SWinDownsample
+from .deformable import Deformable
+from .maxvit import DMSAMaxViT
 
 __all__ = (
     "Conv",
@@ -156,4 +158,6 @@ __all__ = (
     "CSWinDownsample",
     "Reshape",
     "Stage",
+    "Deformable",
+    "DMSAMaxViT"
 )
