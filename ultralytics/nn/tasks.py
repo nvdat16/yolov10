@@ -316,7 +316,10 @@ class DetectionModel(BaseModel):
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
             if isinstance(m, v10Detect):
                 forward = lambda x: self.forward(x)["one2many"]
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            # m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            device = next(self.parameters()).device
+            dummy = torch.zeros(1, ch, s, s, device=device)
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(dummy)]) # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -990,7 +993,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             depth_ = args[1]
             num_heads = args[2]
             args = [c2, depth_, num_heads]
-            
+
         elif m is DMSAMaxViT:
             c1 = ch[f]
             c2 = args[0]
@@ -1043,8 +1046,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = ch[f][idx]
             else:
                 c2 = ch[f]
-        # elif m is DMSAMaxViT:
-
         else:
             c2 = ch[f]
 
