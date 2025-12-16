@@ -136,6 +136,14 @@ def grid_reverse(
     return output
 
 
+def pad_to_multiple(x, multiple):
+    B, C, H, W = x.shape
+    pad_h = (multiple - H % multiple) % multiple
+    pad_w = (multiple - W % multiple) % multiple
+    x = torch.nn.functional.pad(x, (0, pad_w, 0, pad_h))
+    return x, H, W
+
+
 def get_relative_position_index(
         win_h: int,
         win_w: int
@@ -174,7 +182,7 @@ class RelativeSelfAttention(nn.Module):
     def __init__(
             self,
             in_channels: int,
-            num_heads: int = 32,
+            num_heads: int = 8,
             grid_window_size: Tuple[int, int] = (8, 8),
             attn_drop: float = 0.,
             drop: float = 0.
@@ -279,7 +287,7 @@ class MaxViTTransformerBlock(nn.Module):
             in_channels: int,
             partition_function: Callable,
             reverse_function: Callable,
-            num_heads: int = 32,
+            num_heads: int = 8,
             grid_window_size: Tuple[int, int] = (8, 8),
             attn_drop: float = 0.,
             drop: float = 0.,
@@ -313,26 +321,23 @@ class MaxViTTransformerBlock(nn.Module):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """ Forward pass.
-
-        Args:
-            input (torch.Tensor): Input tensor of the shape [B, C_in, H, W].
-
-        Returns:
-            output (torch.Tensor): Output tensor of the shape [B, C_out, H (// 2), W (// 2)].
-        """
         # Save original shape
         B, C, H, W = input.shape
-        # Perform partition
-        input_partitioned = self.partition_function(input, self.grid_window_size)
-        input_partitioned = input_partitioned.view(-1, self.grid_window_size[0] * self.grid_window_size[1], C)
-        # Perform normalization, attention, and dropout
-        output = input_partitioned + self.drop_path(self.attention(self.norm_1(input_partitioned)))
-        # Perform normalization, MLP, and dropout
-        output = output + self.drop_path(self.mlp(self.norm_2(output)))
-        # Reverse partition
-        output = self.reverse_function(output, (H, W), self.grid_window_size)
-        return output
+        win_h, win_w = self.grid_window_size
+        # PAD feature map
+        input, H0, W0 = pad_to_multiple(input, win_h)
+        Hp, Wp = input.shape[-2:]
+        # Partition
+        x = self.partition_function(input, self.grid_window_size)
+        x = x.view(-1, win_h * win_w, C)
+        # Attention + FFN
+        x = x + self.drop_path(self.attention(self.norm_1(x)))
+        x = x + self.drop_path(self.mlp(self.norm_2(x)))
+        # Reverse
+        x = self.reverse_function(x, (Hp, Wp), self.grid_window_size)
+        # Unpad về kích thước gốc
+        x = x[:, :, :H0, :W0]
+        return x
 
 
 class DMSAMaxViTBlock(nn.Module):
