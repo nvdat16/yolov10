@@ -12,6 +12,7 @@ from typing import Type, Callable, Tuple, Optional, Set, List, Union
 import torch
 import torch.nn as nn
 
+from timm.models.efficientnet_blocks import SqueezeExcite, DepthwiseSeparableConv
 from timm.models.layers import drop_path, trunc_normal_, Mlp, DropPath
 
 
@@ -41,6 +42,101 @@ class ConvFFN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
+def _gelu_ignore_parameters(
+        *args,
+        **kwargs
+) -> nn.Module:
+    """ Bad trick to ignore the inplace=True argument in the DepthwiseSeparableConv of Timm.
+
+    Args:
+        *args: Ignored.
+        **kwargs: Ignored.
+
+    Returns:
+        activation (nn.Module): GELU activation function.
+    """
+    activation = nn.GELU()
+    return activation
+
+
+class MBConv(nn.Module):
+    """ MBConv block as described in: https://arxiv.org/pdf/2204.01697.pdf.
+
+        Without downsampling:
+        x ← x + Proj(SE(DWConv(Conv(Norm(x)))))
+
+        With downsampling:
+        x ← Proj(Pool2D(x)) + Proj(SE(DWConv ↓(Conv(Norm(x))))).
+
+        Conv is a 1 X 1 convolution followed by a Batch Normalization layer and a GELU activation.
+        SE is the Squeeze-Excitation layer.
+        Proj is the shrink 1 X 1 convolution.
+
+        Note: This implementation differs slightly from the original MobileNet implementation!
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        downscale (bool, optional): If true downscale by a factor of two is performed. Default: False
+        act_layer (Type[nn.Module], optional): Type of activation layer to be utilized. Default: nn.GELU
+        norm_layer (Type[nn.Module], optional): Type of normalization layer to be utilized. Default: nn.BatchNorm2d
+        drop_path (float, optional): Dropout rate to be applied during training. Default 0.
+    """
+
+    def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            downscale: bool = False,
+            act_layer: Type[nn.Module] = nn.GELU,
+            norm_layer: Type[nn.Module] = nn.BatchNorm2d,
+            drop_path: float = 0.,
+    ) -> None:
+        """ Constructor method """
+        # Call super constructor
+        super(MBConv, self).__init__()
+        # Save parameter
+        self.drop_path_rate: float = drop_path
+        # Check parameters for downscaling
+        if not downscale:
+            assert in_channels == out_channels, "If downscaling is utilized input and output channels must be equal."
+        # Ignore inplace parameter if GELU is used
+        if act_layer == nn.GELU:
+            act_layer = _gelu_ignore_parameters
+        # Make main path
+        self.main_path = nn.Sequential(
+            norm_layer(in_channels),
+            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=(1, 1)),
+            DepthwiseSeparableConv(in_chs=in_channels, out_chs=out_channels, stride=2 if downscale else 1,
+                                   act_layer=act_layer, norm_layer=norm_layer, drop_path_rate=drop_path),
+            SqueezeExcite(in_chs=out_channels, rd_ratio=0.25),
+            nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=(1, 1))
+        )
+        # Make skip path
+        self.skip_path = nn.Sequential(
+            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
+            nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1))
+        ) if downscale else nn.Identity()
+
+    def forward(
+            self,
+            input: torch.Tensor
+    ) -> torch.Tensor:
+        """ Forward pass.
+
+        Args:
+            input (torch.Tensor): Input tensor of the shape [B, C_in, H, W].
+
+        Returns:
+            output (torch.Tensor): Output tensor of the shape [B, C_out, H (// 2), W (// 2)] (downscaling is optional).
+        """
+        output = self.main_path(input)
+        if self.drop_path_rate > 0.:
+            output = drop_path(output, self.drop_path_rate, self.training)
+        output = output + self.skip_path(input)
+        return output
+    
 
 def window_partition(
         input: torch.Tensor,
@@ -398,4 +494,189 @@ class DMSAMaxViT(nn.Module):
 
     def forward(self, x):
         x = self.blocks(x)
+        return x
+    
+class MaxViTBlock(nn.Module):
+    """ MaxViT block composed of MBConv block, Block Attention, and Grid Attention.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        downscale (bool, optional): If true spatial downscaling is performed. Default: False
+        num_heads (int, optional): Number of attention heads. Default 32
+        grid_window_size (Tuple[int, int], optional): Grid/Window size to be utilized. Default (8, 8)
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        drop (float, optional): Dropout ratio of output. Default: 0.0
+        drop_path (float, optional): Dropout ratio of path. Default: 0.0
+        mlp_ratio (float, optional): Ratio of mlp hidden dim to embedding dim. Default: 4.0
+        act_layer (Type[nn.Module], optional): Type of activation layer to be utilized. Default: nn.GELU
+        norm_layer (Type[nn.Module], optional): Type of normalization layer to be utilized. Default: nn.BatchNorm2d
+        norm_layer_transformer (Type[nn.Module], optional): Normalization layer in Transformer. Default: nn.LayerNorm
+    """
+
+    def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            downscale: bool = False,
+            num_heads: int = 32,
+            grid_window_size: Tuple[int, int] = (10, 10),
+            attn_drop: float = 0.,
+            drop: float = 0.,
+            drop_path: float = 0.,
+            mlp_ratio: float = 4.,
+            act_layer: Type[nn.Module] = nn.GELU,
+            norm_layer: Type[nn.Module] = nn.BatchNorm2d,
+            norm_layer_transformer: Type[nn.Module] = nn.LayerNorm
+    ) -> None:
+        """ Constructor method """
+        # Call super constructor
+        super(MaxViTBlock, self).__init__()
+        # Init MBConv block
+        self.mb_conv = MBConv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            downscale=downscale,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            drop_path=drop_path
+        )
+        # Init Block and Grid Transformer
+        self.block_transformer = MaxViTTransformerBlock(
+            in_channels=out_channels,
+            partition_function=window_partition,
+            reverse_function=window_reverse,
+            num_heads=num_heads,
+            grid_window_size=grid_window_size,
+            attn_drop=attn_drop,
+            drop=drop,
+            drop_path=drop_path,
+            mlp_ratio=mlp_ratio,
+            act_layer=act_layer,
+            norm_layer=norm_layer_transformer
+        )
+        self.grid_transformer = MaxViTTransformerBlock(
+            in_channels=out_channels,
+            partition_function=grid_partition,
+            reverse_function=grid_reverse,
+            num_heads=num_heads,
+            grid_window_size=grid_window_size,
+            attn_drop=attn_drop,
+            drop=drop,
+            drop_path=drop_path,
+            mlp_ratio=mlp_ratio,
+            act_layer=act_layer,
+            norm_layer=norm_layer_transformer
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """ Forward pass.
+
+        Args:
+            input (torch.Tensor): Input tensor of the shape [B, C_in, H, W]
+
+        Returns:
+            output (torch.Tensor): Output tensor of the shape [B, C_out, H // 2, W // 2] (downscaling is optional)
+        """
+        output = self.grid_transformer(self.block_transformer(self.mb_conv(input)))
+        return output
+
+
+
+class MaxViTStage(nn.Module):
+    """ Stage of the MaxViT.
+
+    Args:
+        depth (int): Depth of the stage.
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        num_heads (int, optional): Number of attention heads. Default 32
+        grid_window_size (Tuple[int, int], optional): Grid/Window size to be utilized. Default (8, 8)
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        drop (float, optional): Dropout ratio of output. Default: 0.0
+        drop_path (float, optional): Dropout ratio of path. Default: 0.0
+        mlp_ratio (float, optional): Ratio of mlp hidden dim to embedding dim. Default: 4.0
+        act_layer (Type[nn.Module], optional): Type of activation layer to be utilized. Default: nn.GELU
+        norm_layer (Type[nn.Module], optional): Type of normalization layer to be utilized. Default: nn.BatchNorm2d
+        norm_layer_transformer (Type[nn.Module], optional): Normalization layer in Transformer. Default: nn.LayerNorm
+    """
+
+    def __init__(
+            self,
+            depth: int,
+            in_channels: int,
+            out_channels: int,
+            num_heads: int = 32,
+            grid_window_size: Tuple[int, int] = (10, 10),
+            attn_drop: float = 0.,
+            drop: float = 0.,
+            drop_path: Union[List[float], float] = 0.,
+            mlp_ratio: float = 4.,
+            act_layer: Type[nn.Module] = nn.GELU,
+            norm_layer: Type[nn.Module] = nn.BatchNorm2d,
+            norm_layer_transformer: Type[nn.Module] = nn.LayerNorm
+    ) -> None:
+        """ Constructor method """
+        # Call super constructor
+        super(MaxViTStage, self).__init__()
+        # Init blocks
+        # drop_path = torch.linspace(0.0, drop_path, sum(self.depth)).tolist()
+        self.blocks = nn.Sequential(*[
+            MaxViTBlock(
+                in_channels=in_channels if index == 0 else out_channels,
+                out_channels=out_channels,
+                downscale=index == 0,
+                num_heads=num_heads,
+                grid_window_size=grid_window_size,
+                attn_drop=attn_drop,
+                drop=drop,
+                drop_path=drop_path if isinstance(drop_path, float) else drop_path[index],
+                mlp_ratio=mlp_ratio,
+                act_layer=act_layer,
+                norm_layer=norm_layer,
+                norm_layer_transformer=norm_layer_transformer
+            )
+            for index in range(depth)
+        ])
+
+    def forward(self, input=torch.Tensor) -> torch.Tensor:
+        """ Forward pass.
+
+        Args:
+            input (torch.Tensor): Input tensor of the shape [B, C_in, H, W].
+
+        Returns:
+            output (torch.Tensor): Output tensor of the shape [B, C_out, H // 2, W // 2].
+        """
+        output = self.blocks(input)
+        return output
+
+
+class MaxViTStem(nn.Module):
+    def __init__(
+        self,
+        in_chans=3,
+        embed_dim=64,
+        act_layer=nn.GELU,
+        norm_layer=nn.BatchNorm2d
+    ):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(
+            in_chans, embed_dim,
+            kernel_size=3, stride=2, padding=1, bias=False
+        )
+        self.norm1 = norm_layer(embed_dim)
+        self.act1 = act_layer()
+
+        self.conv2 = nn.Conv2d(
+            embed_dim, embed_dim,
+            kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self.norm2 = norm_layer(embed_dim)
+        self.act2 = act_layer()
+
+    def forward(self, x):
+        x = self.act1(self.norm1(self.conv1(x)))
+        x = self.act2(self.norm2(self.conv2(x)))
         return x
