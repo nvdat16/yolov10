@@ -64,7 +64,9 @@ from ultralytics.nn.modules import (
     Reshape,
     Stage,
     DMSAMaxViT,
-    Deformable
+    Deformable,
+    MaxViTStem,
+    MaxViTStage,
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -1004,6 +1006,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             depth_ = args[1]
             num_heads = args[2]
             args = [c2, depth_, num_heads]
+
+        elif m is MaxViTStem:
+            c1 = ch[f]
+            c2 = args[0]
+            args = [c1, c2]
+            
+        elif m is MaxViTStage:
+            c1 = ch[f]          # input channels
+            depth_ = args[0]    # depth
+            c2 = args[1]        # out_channels
+
+            # scale channel theo width
+            # c2 = make_divisible(min(c2, max_channels) * width, 8)
+
+            args = [depth_, c1, c2]
+
 
         elif m is AIFI:
             args = [ch[f], *args]
