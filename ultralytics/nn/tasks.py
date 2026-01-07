@@ -67,6 +67,7 @@ from ultralytics.nn.modules import (
     Deformable,
     MaxViTStem,
     MaxViTStage,
+    CSWinTransformer,
 )
 
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -1010,16 +1011,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is MaxViTStem:
             c1 = ch[f]
             c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2]
             
         elif m is MaxViTStage:
-            c1 = ch[f]          # input channels
-            depth_ = args[0]    # depth
-            c2 = args[1]        # out_channels
-
-            # scale channel theo width
-            # c2 = make_divisible(min(c2, max_channels) * width, 8)
-
+            c1 = ch[f]      
+            depth_ = args[0]   
+            c2 = args[1]       
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [depth_, c1, c2]
 
 
@@ -1049,11 +1050,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
-        # elif m is CSWinTransformer:
-        #     cswin = CSWinTransformer(*args)
-        #     c2 = list(cswin.out_channels)  # lấy đúng out_channels từ CSWinTransformer
-        #     for c in c2:
-        #         ch.append(c)
+        elif m is CSWinTransformer:
+            cswin = CSWinTransformer(*args)
+            c2 = list(cswin.out_channels)  # lấy đúng out_channels từ CSWinTransformer
+            for c in c2:
+                ch.append(c)
         elif m is SwinTransformerV2:
             swin = SwinTransformerV2(*args)
             c2 = list(swin.out_channels)  # lấy đúng out_channels từ SwinTransformerV2
