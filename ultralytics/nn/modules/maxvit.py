@@ -623,7 +623,7 @@ class MaxViTStage(nn.Module):
         # drop_path = torch.linspace(0.0, drop_path, sum(self.depth)).tolist()
         self.blocks = nn.Sequential(*[
             MaxViTBlock(
-                in_channels=in_channels,
+                in_channels=in_channels if index == 0 else out_channels,
                 out_channels=out_channels,
                 downscale=index == 0,
                 num_heads=num_heads,
