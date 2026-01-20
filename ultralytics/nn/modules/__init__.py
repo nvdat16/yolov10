@@ -26,6 +26,7 @@ from .block import (
     SPP,
     SPPF,
     Bottleneck,
+    BottleneckMbN,
     BottleneckCSP,
     C2f,
     C2fAttn,
@@ -78,13 +79,13 @@ from .transformer import (
     TransformerBlock,
     TransformerEncoderLayer,
     TransformerLayer,
+    DeformableBlock,
 )
 from .cswin import CSWinStem, CSWinStage, CSWinDownsample, Reshape
-from .swin_transformer_v2 import SwinTransformerV2, Stage
 from .swinv2 import SWinStem, SWinStage, SWinDownsample
 from .deformable import Deformable
 from .maxvit import DMSAMaxViT, MaxViTStem, MaxViTStage
-from .cswin2 import CSWinTransformer
+from .cswin2 import CSWinTransformer, Stage
 
 __all__ = (
     "Conv",
@@ -119,6 +120,7 @@ __all__ = (
     "C3Ghost",
     "GhostBottleneck",
     "Bottleneck",
+    "BottleneckMbN",
     "BottleneckCSP",
     "Proto",
     "Detect",
@@ -164,4 +166,5 @@ __all__ = (
     "MaxViTStem",
     "MaxViTStage",
     "CSWinTransformer",
+    "DeformableBlock",
 )

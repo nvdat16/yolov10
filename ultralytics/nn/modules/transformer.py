@@ -22,6 +22,7 @@ __all__ = (
     "DeformableTransformerDecoderLayer",
     "MSDeformAttn",
     "MLP",
+    "DeformableBlock",
 )
 
 
@@ -424,3 +425,115 @@ class DeformableTransformerDecoder(nn.Module):
             refer_bbox = refined_bbox.detach() if self.training else refined_bbox
 
         return torch.stack(dec_bboxes), torch.stack(dec_cls)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        rms = x.pow(2).mean(dim=-1, keepdim=True).sqrt()
+        return x / (rms + self.eps) * self.weight
+
+
+class ConvFFN(nn.Module):
+    def __init__(self, dim, mlp_ratio=4):
+        super().__init__()
+        hidden_dim = int(dim * mlp_ratio)
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1, groups=hidden_dim),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, dim, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0. or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()
+        return x.div(keep_prob) * random_tensor
+    
+
+def build_reference_points(H, W, B, device):
+    ref_y, ref_x = torch.meshgrid(
+        torch.linspace(0.5 / H, 1.0 - 0.5 / H, H, device=device),
+        torch.linspace(0.5 / W, 1.0 - 0.5 / W, W, device=device),
+        indexing="ij"
+    )
+    ref = torch.stack((ref_x, ref_y), dim=-1)      # (H, W, 2)
+    ref = ref.view(1, H * W, 1, 2).repeat(B, 1, 1, 1)
+    return ref
+
+
+class DeformableBlock(nn.Module):
+    def __init__(self, dim, num_heads=8, mlp_ratio=4.0, drop_path=0.0, n_points=4):
+        super().__init__()
+
+        # Attention
+        self.norm1 = RMSNorm(dim)
+        self.attn = MSDeformAttn(
+            d_model=dim,
+            n_levels=1,
+            n_heads=num_heads,
+            n_points=n_points,
+        )
+
+        # FFN
+        self.norm2 = RMSNorm(dim)
+        self.ffn = ConvFFN(dim, mlp_ratio)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
+    def forward(self, x):
+        """
+        x: (B, C, H, W)
+        """
+        B, C, H, W = x.shape
+        device = x.device
+
+        # Deformable Attention
+        x_norm = self.norm1(x.permute(0, 2, 3, 1))   # (B,H,W,C)
+        x_norm = x_norm.permute(0, 3, 1, 2)          # (B,C,H,W)
+
+        # flatten
+        query = x_norm.flatten(2).transpose(1, 2)   # (B, HW, C)
+        value = query
+
+        spatial_shapes = torch.as_tensor([[H, W]], dtype=torch.long, device=device)
+        level_start_index = torch.as_tensor([0], dtype=torch.long, device=device)
+
+        reference_points = build_reference_points(H, W, B, device)
+
+        attn_out = self.attn(
+            query=query,
+            reference_points=reference_points,
+            input_flatten=value,
+            input_spatial_shapes=spatial_shapes,
+            input_level_start_index=level_start_index,
+            input_padding_mask=None,
+        )
+
+        attn_out = attn_out.transpose(1, 2).reshape(B, C, H, W)
+        x = x + self.drop_path(attn_out)
+
+        # FFN
+        x_norm = self.norm2(x.permute(0, 2, 3, 1))
+        x_norm = x_norm.permute(0, 3, 1, 2)
+
+        x = x + self.drop_path(self.ffn(x_norm))
+        return x
