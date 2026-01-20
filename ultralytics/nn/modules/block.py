@@ -28,7 +28,6 @@ __all__ = (
     "C3Ghost",
     "GhostBottleneck",
     "Bottleneck",
-    "BottleneckMbN",
     "BottleneckCSP",
     "Proto",
     "RepC3",
@@ -39,6 +38,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "MBv2Stage",
 )
 
 
@@ -343,21 +343,36 @@ class Bottleneck(nn.Module):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 
-class BottleneckMbN(nn.Module):
+class BottleneckMBv2(nn.Module):
     """MobileNetV2 Bottleneck."""
 
-    def __init__(self, c1, c2, t=1, s=1, k=3):
+    def __init__(self, c1, c2, t=1, s=1, k=3, nl=nn.ReLU6):
         """Initializes a MobileNetV2 Bottleneck module with given input/output channels, expansion, stride, kernel size."""
         super().__init__()
         c_ = int(c1 * t)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1, act=nn.ReLU6())
-        self.cv2 = DWConv(c_, c_, k, s, act=nn.ReLU6())
+        self.cv1 = Conv(c1, c_, 1, 1, act=nl())
+        self.cv2 = DWConv(c_, c_, k, s, act=nl())
         self.cv3 = Conv(c_, c2, 1, 1, act=False)
         self.add = s == 1 and c1 == c2
 
     def forward(self, x):
         """Forward pass through MobileNetV2 Bottleneck layer."""
         return x + self.cv3(self.cv2(self.cv1(x))) if self.add else self.cv3(self.cv2(self.cv1(x)))
+    
+
+class MBv2Stage(nn.Module):
+    def __init__(self, c1, c2, t, n, s):
+        super().__init__()
+        layers = []
+        for i in range(n):
+            layers.append(
+                BottleneckMBv2(c1 if i == 0 else c2, c2, t, s if i == 0 else 1)
+            )
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.block(x)
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""

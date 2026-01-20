@@ -17,7 +17,7 @@ from ultralytics.nn.modules import (
     SPP,
     SPPF,
     Bottleneck,
-    BottleneckMbN,
+    MBv2Stage,
     BottleneckCSP,
     C2f,
     C2fAttn,
@@ -914,7 +914,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             PSA,
             SCDown,
             C2fCIB,
-            BottleneckMbN,
+            MBv2Stage,
         }:
             c1 = current_ch_in[0] if isinstance(current_ch_in, tuple) else current_ch_in
             c2 = args[0]

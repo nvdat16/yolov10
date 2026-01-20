@@ -26,7 +26,6 @@ from .block import (
     SPP,
     SPPF,
     Bottleneck,
-    BottleneckMbN,
     BottleneckCSP,
     C2f,
     C2fAttn,
@@ -50,7 +49,8 @@ from .block import (
     PSA,
     C2fCIB,
     SCDown,
-    RepVGGDW
+    RepVGGDW,
+    MBv2Stage,
 )
 from .conv import (
     CBAM,
@@ -120,7 +120,7 @@ __all__ = (
     "C3Ghost",
     "GhostBottleneck",
     "Bottleneck",
-    "BottleneckMbN",
+    "MBv2Stage",
     "BottleneckCSP",
     "Proto",
     "Detect",
