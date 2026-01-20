@@ -55,7 +55,6 @@ from ultralytics.nn.modules import (
     SCDown,
     RepVGGDW,
     v10Detect,
-    SwinTransformerV2,
     SWinStem,
     SWinStage,
     SWinDownsample,
@@ -1057,11 +1056,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = list(cswin.out_channels)  # lấy đúng out_channels từ CSWinTransformer
             for c in c2:
                 ch.append(c)
-        elif m is SwinTransformerV2:
-            swin = SwinTransformerV2(*args)
-            c2 = list(swin.out_channels)  # lấy đúng out_channels từ SwinTransformerV2
-            for c in c2:
-                ch.append(c)
+
         elif m is Stage:
             idx = args[0]
             # ch[f] là list các channels output của backbone, lấy đúng index

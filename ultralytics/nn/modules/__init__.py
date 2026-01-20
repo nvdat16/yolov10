@@ -152,7 +152,6 @@ __all__ = (
     "SCDown",
     "RepVGGDW",
     "v10Detect",
-    "SwinTransformerV2",
     "SWinStem",
     "SWinStage",
     "SWinDownsample",
