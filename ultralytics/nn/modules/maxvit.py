@@ -12,8 +12,52 @@ from typing import Type, Callable, Tuple, Optional, Set, List, Union
 import torch
 import torch.nn as nn
 
-from timm.models.efficientnet_blocks import SqueezeExcite, DepthwiseSeparableConv
-from timm.models.layers import drop_path, trunc_normal_, Mlp, DropPath
+from timm.layers import drop_path, trunc_normal_, Mlp, DropPath, SqueezeExcite
+
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(
+        self,
+        in_chs,
+        out_chs,
+        kernel_size=3,
+        stride=1,
+        dilation=1,
+        padding=None,
+        bias=False,
+        norm_layer=nn.BatchNorm2d,
+        act_layer=nn.ReLU,
+    ):
+        super().__init__()
+        if padding is None:
+            padding = (kernel_size - 1) // 2
+
+        self.conv_dw = nn.Conv2d(
+            in_chs,
+            in_chs,
+            kernel_size,
+            stride,
+            padding,
+            dilation=dilation,
+            groups=in_chs,
+            bias=bias,
+        )
+        self.bn1 = norm_layer(in_chs)
+        self.act1 = act_layer(inplace=True)
+
+        self.conv_pw = nn.Conv2d(
+            in_chs,
+            out_chs,
+            kernel_size=1,
+            bias=bias,
+        )
+        self.bn2 = norm_layer(out_chs)
+        self.act2 = act_layer(inplace=True)
+
+    def forward(self, x):
+        x = self.act1(self.bn1(self.conv_dw(x)))
+        x = self.act2(self.bn2(self.conv_pw(x)))
+        return x
 
 
 class RMSNorm(nn.Module):
@@ -109,8 +153,8 @@ class MBConv(nn.Module):
             norm_layer(in_channels),
             nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=(1, 1)),
             DepthwiseSeparableConv(in_chs=in_channels, out_chs=out_channels, stride=2 if downscale else 1,
-                                   act_layer=act_layer, norm_layer=norm_layer, drop_path_rate=drop_path),
-            SqueezeExcite(in_chs=out_channels, rd_ratio=0.25),
+                                   act_layer=act_layer, norm_layer=norm_layer),
+            SqueezeExcite(out_channels, rd_ratio=0.25),
             nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=(1, 1))
         )
         # Make skip path
