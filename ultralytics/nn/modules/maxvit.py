@@ -277,9 +277,10 @@ def grid_reverse(
 
 
 def pad_to_multiple(x, multiple):
-    B, C, H, W = x.shape
-    pad_h = (multiple - H % multiple) % multiple
-    pad_w = (multiple - W % multiple) % multiple
+    _, _, H, W = x.shape
+    multiple_h, multiple_w = (multiple, multiple) if isinstance(multiple, int) else multiple
+    pad_h = (multiple_h - H % multiple_h) % multiple_h
+    pad_w = (multiple_w - W % multiple_w) % multiple_w
     x = torch.nn.functional.pad(x, (0, pad_w, 0, pad_h))
     return x, H, W
 
@@ -334,7 +335,10 @@ class RelativeSelfAttention(nn.Module):
         self.in_channels: int = in_channels
         self.num_heads: int = num_heads
         self.grid_window_size: Tuple[int, int] = grid_window_size
-        self.scale: float = num_heads ** -0.5
+        if in_channels % num_heads != 0:
+            raise ValueError(f"in_channels ({in_channels}) must be divisible by num_heads ({num_heads})")
+        self.head_dim: int = in_channels // num_heads
+        self.scale: float = self.head_dim ** -0.5
         self.attn_area: int = grid_window_size[0] * grid_window_size[1]
         # Init layers
         self.qkv_mapping = nn.Linear(in_features=in_channels, out_features=3 * in_channels, bias=True)
@@ -386,6 +390,7 @@ class RelativeSelfAttention(nn.Module):
         q = q * self.scale
         # Compute attention maps
         attn = self.softmax(q @ k.transpose(-2, -1) + self._get_relative_positional_bias())
+        attn = self.attn_drop(attn)
         # Map value with attention maps
         output = (attn @ v).transpose(1, 2).reshape(B_, N, -1)
         # Perform final projection and dropout
@@ -462,10 +467,10 @@ class MaxViTTransformerBlock(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Save original shape
-        B, C, H, W = input.shape
+        _, C, _, _ = input.shape
         win_h, win_w = self.grid_window_size
         # PAD feature map
-        input, H0, W0 = pad_to_multiple(input, win_h)
+        input, H0, W0 = pad_to_multiple(input, self.grid_window_size)
         Hp, Wp = input.shape[-2:]
         # Partition
         x = self.partition_function(input, self.grid_window_size)
@@ -480,50 +485,81 @@ class MaxViTTransformerBlock(nn.Module):
         return x
 
 
+class PartitionAttention(nn.Module):
+    """Apply attention to either local windows or sparse grids without an internal residual or FFN."""
+
+    def __init__(
+            self,
+            dim: int,
+            partition_function: Callable,
+            reverse_function: Callable,
+            num_heads: int,
+            grid_window_size: Tuple[int, int] = (8, 8),
+            attn_drop: float = 0.,
+            drop: float = 0.,
+    ) -> None:
+        super().__init__()
+        self.partition_function = partition_function
+        self.reverse_function = reverse_function
+        self.grid_window_size = grid_window_size
+        self.attention = RelativeSelfAttention(
+            in_channels=dim,
+            num_heads=num_heads,
+            grid_window_size=grid_window_size,
+            attn_drop=attn_drop,
+            drop=drop,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, channels, _, _ = x.shape
+        window_h, window_w = self.grid_window_size
+        x, original_h, original_w = pad_to_multiple(x, self.grid_window_size)
+        padded_size = x.shape[-2:]
+        x = self.partition_function(x, self.grid_window_size)
+        x = x.reshape(-1, window_h * window_w, channels)
+        x = self.attention(x)
+        x = self.reverse_function(x, padded_size, self.grid_window_size)
+        return x[:, :, :original_h, :original_w]
+
+
 class DMSAMaxViTBlock(nn.Module):
-    def __init__(self, dim, num_heads):
+    """Parallel window/grid self-attention followed by one shared residual FFN."""
+
+    def __init__(self, dim, num_heads, grid_window_size=(8, 8), drop_path=0.):
         super().__init__()
         self.norm1 = RMSNorm(dim)
 
-        # Window Attention
-        self.window_attn = MaxViTTransformerBlock(
-            in_channels=dim,
+        self.window_attn = PartitionAttention(
+            dim=dim,
             partition_function=window_partition,
             reverse_function=window_reverse,
             num_heads=num_heads,
-            norm_layer=nn.Identity,  # đã norm bên ngoài
+            grid_window_size=grid_window_size,
         )
-
-        # Grid Attention
-        self.grid_attn = MaxViTTransformerBlock(
-            in_channels=dim,
+        self.grid_attn = PartitionAttention(
+            dim=dim,
             partition_function=grid_partition,
             reverse_function=grid_reverse,
             num_heads=num_heads,
-            norm_layer=nn.Identity,
+            grid_window_size=grid_window_size,
         )
 
-        # Attention fusion
-        self.attn_proj = nn.Conv2d(dim, dim, 1)
-
+        self.attn_proj = nn.Conv2d(2 * dim, dim, 1)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = RMSNorm(dim)
         self.ffn = ConvFFN(dim)
 
     def forward(self, x):
-        B, C, H, W = x.shape
-
-        # --- Dual attention ---
-        x_norm = self.norm1(x.permute(0,2,3,1)).permute(0,3,1,2)
+        x_norm = self.norm1(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
         win = self.window_attn(x_norm)
         grid = self.grid_attn(x_norm)
 
-        attn = self.attn_proj(win + grid)
-        x = x + attn
+        attn = self.attn_proj(torch.cat((win, grid), dim=1))
+        x = x + self.drop_path(attn)
 
-        # --- FFN ---
-        x_norm = self.norm2(x.permute(0,2,3,1)).permute(0,3,1,2)
-        x = x + self.ffn(x_norm)
+        x_norm = self.norm2(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = x + self.drop_path(self.ffn(x_norm))
 
         return x
 

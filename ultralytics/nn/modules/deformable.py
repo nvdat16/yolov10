@@ -19,7 +19,11 @@ import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 
-from ultralytics.nn import MultiScaleDeformableAttention as MSDA
+try:
+    from ultralytics.nn import MultiScaleDeformableAttention as MSDA
+except ImportError as error:
+    MSDA = None
+    _MSDA_IMPORT_ERROR = error
 
 
 class RMSNorm(nn.Module):
@@ -135,6 +139,11 @@ class MSDeformAttn(nn.Module):
         :param n_points     number of sampling points per attention head per feature level
         """
         super().__init__()
+        if MSDA is None:
+            raise RuntimeError(
+                "MultiScaleDeformableAttention is not built. Install PyTorch/CUDA first, then run "
+                "`YOLOV10_BUILD_MSDA=1 pip install -e . --no-build-isolation`."
+            ) from _MSDA_IMPORT_ERROR
         if d_model % n_heads != 0:
             raise ValueError('d_model must be divisible by n_heads, but got {} and {}'.format(d_model, n_heads))
         _d_per_head = d_model // n_heads
@@ -285,4 +294,3 @@ class Deformable(nn.Module):
     def forward(self, x):
         x = self.blocks(x)
         return x
-    

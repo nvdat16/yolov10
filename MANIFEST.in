@@ -1,0 +1,1 @@
+recursive-include ultralytics/nn/ops/ms_deform_attn *.cpp *.h *.cu *.cuh LICENSE README.md

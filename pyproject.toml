@@ -72,6 +72,7 @@ dependencies = [
     "scipy>=1.4.1",
     "torch>=1.8.0",
     "torchvision>=0.9.0",
+    "timm>=0.9.16",
     "tqdm>=4.64.0", # progress bars
     "psutil", # system utilization
     "py-cpuinfo", # display CPU info
@@ -135,7 +136,7 @@ ultralytics = "ultralytics.cfg:entrypoint"
 # Tools settings -------------------------------------------------------------------------------------------------------
 [tool.setuptools]  # configuration specific to the `setuptools` build backend.
 packages = { find = { where = ["."], include = ["ultralytics", "ultralytics.*"] } }
-package-data = { "ultralytics" = ["**/*.yaml"], "ultralytics.assets" = ["*.jpg"] }
+package-data = { "ultralytics" = ["**/*.yaml", "nn/ops/ms_deform_attn/src/**/*.cpp", "nn/ops/ms_deform_attn/src/**/*.h", "nn/ops/ms_deform_attn/src/**/*.cu", "nn/ops/ms_deform_attn/src/**/*.cuh", "nn/ops/ms_deform_attn/LICENSE", "nn/ops/ms_deform_attn/README.md"], "ultralytics.assets" = ["*.jpg"] }
 
 [tool.setuptools.dynamic]
 version = { attr = "ultralytics.__version__" }
